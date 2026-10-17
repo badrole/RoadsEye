@@ -27,15 +27,15 @@ export default function ClassBreakdown({ latest }) {
           No detections yet
         </div>
       ) : (
-        <div className="flex items-center gap-4">
-          <ResponsiveContainer width="50%" height={160}>
+        <div className="flex flex-col gap-4">
+          <ResponsiveContainer width="100%" height={170}>
             <PieChart>
               <Pie
                 data={data}
                 cx="50%"
                 cy="50%"
-                innerRadius={45}
-                outerRadius={70}
+                innerRadius={48}
+                outerRadius={74}
                 paddingAngle={3}
                 dataKey="value"
                 isAnimationActive={false}
@@ -54,8 +54,8 @@ export default function ClassBreakdown({ latest }) {
             </PieChart>
           </ResponsiveContainer>
 
-          {/* Legend */}
-          <div className="flex-1 flex flex-col gap-2 text-sm">
+          {/* Legend — di bawah chart */}
+          <div className="flex flex-col gap-2 text-sm">
             {data.map((entry, i) => (
               <div key={entry.name} className="flex items-center gap-2">
                 <span

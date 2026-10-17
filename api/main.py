@@ -118,4 +118,4 @@ app.include_router(analytics.router)
 
 @app.get("/", include_in_schema=False)
 async def root():
-    return {"message": "TrafficVision API", "docs": "/docs"}
+    return {"message": "RoadsEye API", "docs": "/docs"}

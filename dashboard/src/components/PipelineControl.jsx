@@ -14,13 +14,14 @@ const API = '/api'
 // Default counting line for demo mode: vertical centre line on a 1280×720 frame
 const DEMO_LINE = { name: 'main', x1: 640, y1: 252, x2: 640, y2: 612 }
 
-export default function PipelineControl({ status, onStatusChange }) {
+export default function PipelineControl({ status, onStatusChange, vertical = false }) {
   const [source,    setSource]    = useState('0')
   const [conf,      setConf]      = useState('0.35')
   const [showLines, setShowLines] = useState(false)
   const [lines,     setLines]     = useState([])
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState(null)
+  const [open,      setOpen]      = useState(vertical ? false : true)   // rail: collapsed by default
 
   const isRunning = status?.running ?? false
 
@@ -96,7 +97,22 @@ export default function PipelineControl({ status, onStatusChange }) {
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="bg-asphalt-panel border border-lane-dim/40 rounded-sm p-3">
+    <div className="bg-asphalt-panel border border-lane-dim/40 rounded-sm">
+      {/* Collapse header */}
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-lane-wash transition-colors"
+      >
+        <span className="road-label">Setup Sumber</span>
+        <span className="flex items-center gap-2">
+          {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-go" />}
+          <span className="font-code text-xs text-lane">{open ? '▾' : '▸'}</span>
+        </span>
+      </button>
+
+      {open && (
+      <div className="px-3 pb-3">
       <form onSubmit={handleStart} className="flex flex-col gap-3">
         {/* Source */}
         <div className="flex flex-col gap-1">
@@ -221,6 +237,8 @@ export default function PipelineControl({ status, onStatusChange }) {
             ? `${status.demo_mode ? '[DEMO] ' : ''}RUNNING · frame ${status.frame_index} · ${status.fps} fps · ${String(status.source).slice(0, 46)}…`
             : 'Pipeline stopped'}
         </p>
+      )}
+      </div>
       )}
     </div>
   )

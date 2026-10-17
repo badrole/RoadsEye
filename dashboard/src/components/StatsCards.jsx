@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 
 /**
  * KpiStrip — compact stat row above the CCTV feed.
+ * Uptime = start→now wallclock, detik berjalan realtime.
  */
+export default function StatsCards({ latest, pipelineStatus }) {
   const running  = pipelineStatus?.running ?? false
   const upSec    = pipelineStatus?.uptime_seconds ?? null
   const cards = [

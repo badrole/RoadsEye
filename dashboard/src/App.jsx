@@ -39,59 +39,43 @@ function usePipelineStatus() {
 }
 
 /* ── Left rail: brand + live indicators + pipeline control ───────────────── */
-function ControlRail({ status, connected, onRefresh }) {
+function ControlRail({ status, connected, onRefresh, latest }) {
   const running = status?.running ?? false
 
   return (
     <aside className="w-[268px] shrink-0 hidden lg:flex flex-col border-r border-lane-dim/40 bg-asphalt-deep/70">
-      {/* Brand — road-sign plate */}
-      <div className="px-5 pt-6 pb-5 border-b border-lane-dim/30">
-        <div className="flex items-center gap-3">
-          <svg viewBox="0 0 24 24" className="w-9 h-9" fill="none" aria-hidden="true">
+      {/* Brand — compact plate */}
+      <div className="px-4 pt-4 pb-3 border-b border-lane-dim/30">
+        <div className="flex items-center gap-2.5">
+          <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none" aria-hidden="true">
             <rect x="1" y="1" width="22" height="22" rx="4" stroke="#FFD100" strokeWidth="2" />
-            <path d="M12 21 L12 14" stroke="#FFD100" strokeWidth="2" strokeDasharray="3 2.5" />
-            <path d="M12 13 L8 5" stroke="#FFD100" strokeWidth="2" strokeDasharray="3 2.5" />
-            <path d="M12 13 L16 5" stroke="#FFD100" strokeWidth="2" strokeDasharray="3 2.5" />
+            <path d="M12 21 L12 14M12 13 L8 5M12 13 L16 5" stroke="#FFD100" strokeWidth="2" strokeDasharray="3 2.5" />
           </svg>
           <div>
-            <div className="font-code text-xl font-bold tracking-[0.14em] text-lane">RoadsEye</div>
-            <div className="road-label mt-0.5">Traffic Analytics</div>
+            <div className="font-code text-base font-bold tracking-[0.14em] text-lane leading-none">RoadsEye</div>
+            <div className="road-label mt-1">Traffic Analytics</div>
           </div>
+        </div>
+        {/* status — satu baris kecil */}
+        <div className="mt-3 flex items-center gap-3 font-code text-[11px]">
+          <span className="flex items-center gap-1.5">
+            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-go' : 'bg-stop'}`} />
+            <span className="text-chalk">WS</span>
+          </span>
+          <span className={running ? 'text-lane' : 'text-pip'}>{running ? 'RUN' : 'IDLE'}</span>
+          <span className="text-chalk">{(status?.fps ?? 0).toFixed(0)}<span className="text-pip"> fps</span></span>
         </div>
       </div>
 
-      {/* Live indicators board */}
-      <div className="px-5 py-5 space-y-4 border-b border-lane-dim/30">
-        <div>
-          <div className="road-label mb-1">Connection</div>
-          <div className="flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-go' : 'bg-stop'}`} />
-            <span className="font-code text-sm text-chalk">
-              {connected ? 'WS ACTIVE' : 'WS DOWN'}
-            </span>
-          </div>
+      {/* Pipeline control (collapsible) + breakdown */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="px-3 pt-4">
+          <PipelineControl status={status} onStatusChange={onRefresh} vertical />
         </div>
-        <div>
-          <div className="road-label mb-1">Pipeline</div>
-          <div className={`inline-flex items-center gap-2 font-code text-sm px-2 py-0.5 rounded-sm ${
-            running ? 'bg-lane-wash text-lane' : 'text-pip'
-          }`}>
-            {running ? 'RUNNING' : 'IDLE'}
-          </div>
+        <div className="px-3 pt-4">
+          <div className="road-label mb-2 px-1">Komposisi Kelas</div>
+          <ClassBreakdown latest={latest} />
         </div>
-        <div>
-          <div className="road-label mb-1">Frame Rate</div>
-          <div className="font-code text-4xl font-bold text-lane">
-            {(status?.fps ?? 0).toFixed(0)}
-            <span className="text-pip text-sm ml-1.5">fps</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Pipeline control card */}
-      <div className="px-4 py-5 flex-1 overflow-y-auto">
-        <div className="road-label mb-3 px-1">Setup</div>
-        <PipelineControl status={status} onStatusChange={onRefresh} vertical />
       </div>
 
       <div className="px-5 py-4 border-t border-lane-dim/30">
@@ -141,21 +125,18 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
-      <ControlRail status={status} connected={connected} onRefresh={refresh} />
+      <ControlRail status={status} connected={connected} onRefresh={refresh} latest={latest} />
       <MobileHeader status={status} connected={connected} />
 
       {/* Monitoring deck */}
       <main className="flex-1 min-w-0 p-4 lg:p-6 flex flex-col gap-5">
-        {/* CCTV hero */}
+        {/* CCTV hero — KPI mini strip di atas video */}
         <section>
           <RailTitle>Cctv Live</RailTitle>
+          <div className="mb-2">
+            <StatsCards latest={latest} pipelineStatus={status} />
+          </div>
           <VideoFeed enabled={pipelineRunning} />
-        </section>
-
-        {/* KPI board */}
-        <section>
-          <RailTitle>Detections</RailTitle>
-          <StatsCards latest={latest} pipelineStatus={status} />
         </section>
 
         {/* Charts */}
@@ -170,16 +151,10 @@ export default function App() {
           </div>
         </section>
 
-        {/* Overlay + class split */}
-        <section className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          <div>
-            <RailTitle>Track Overlay</RailTitle>
-            <TrafficFlowMap latest={latest} pipelineStatus={status} />
-          </div>
-          <div>
-            <RailTitle>Class Breakdown</RailTitle>
-            <ClassBreakdown latest={latest} />
-          </div>
+        {/* Track overlay — full width */}
+        <section>
+          <RailTitle>Track Overlay</RailTitle>
+          <TrafficFlowMap latest={latest} pipelineStatus={status} />
         </section>
 
         {/* Alerts — full-width strip */}

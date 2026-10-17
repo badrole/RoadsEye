@@ -1,295 +1,238 @@
-# Traffic Video Analytics Project
+# 🛣️ RoadsEye — CCTV Traffic Analytics Dashboard
 
-Real-time vehicle detection, multi-object tracking, and traffic analytics — end-to-end from raw video to a live React dashboard.
+Real-time vehicle detection, tracking, and traffic analytics dashboard — deteksi kendaraan, penghitungan volume, estimasi kecepatan, dan alert otomatis langsung dari feed CCTV, dibungkus UI bertema aspal & marka jalan. Dibangun untuk Kab. Tangerang — Dinas Perhubungan.
 
-**Stack:** YOLOv8s · ByteTrack · ONNX Runtime GPU · FastAPI · WebSockets · React · Recharts · Tailwind CSS · SQLite · Docker
-
----
-
-## Features
-
-- **Vehicle detection** — YOLOv8s fine-tuned on traffic surveillance footage (UA-DETRAC dataset), exported to ONNX for fast GPU inference
-- **Multi-object tracking** — ByteTrack via the `supervision` library; each vehicle gets a stable track ID across frames
-- **Counting lines** — configurable virtual tripwires; vehicles are counted the moment their center crosses a line
-- **Speed estimation** — pixel displacement × camera calibration constant → km/h per track
-- **Class breakdown** — real-time split across car, bus, motorcycle, and truck
-- **Anomaly detection** — rolling 60-frame window; surge alert fires when count exceeds 2σ from the mean; stopped-vehicle alert for stationary tracks
-- **Drift monitoring** — rolling confidence baseline; alerts when model performance degrades during a live run
-- **Live dashboard** — video feed, KPI cards, vehicle count chart, speed distribution, class breakdown, alerts panel, track overlay canvas
-- **Demo mode** — fully synthetic traffic scene (no ONNX model, no camera, no GPU required)
-- **REST + WebSocket API** — annotated JPEG frames on `/ws/video`, JSON metrics on `/ws/metrics`, historical data via `/analytics/*`
-- **Dockerised** — single `docker compose up` brings up the full stack (GPU optional)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev)
+[![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-3.4-06B6D4?style=flat&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-FFCC00?style=flat)](https://docs.ultralytics.com)
+[![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-GPU_1.22-005CED?style=flat)](https://onnxruntime.ai)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
-## Demo
+## ✨ Fitur
 
-Demo mode generates a synthetic 2-lane traffic scene entirely in software using OpenCV and NumPy. Vehicles spawn with realistic class distribution, travel at 35–78 km/h, and produce real `Detection` objects identical to ONNX model output — no weights file or camera needed.
-
-> Start the project and click **Demo** in the Pipeline Control bar.
+- 🔍 **Deteksi & pelacakan kendaraan real-time** — YOLOv8s ONNX + ByteTrack, dipercepat GPU (CUDA 12) via `onnxruntime-gpu`
+- 🧠 **ID Lock** — label kelas kendaraan dikunci permanen setelah kendaraan melewati *lock line*, mencegah label "pindah kelas" saat oklusi sebelum garis hitung
+- 📊 **Dashboard monitoring langsung** — video feed MJPEG-over-WebSocket, KPI strip, grafik jumlah kendaraan, distribusi kecepatan, komposisi kelas (pie chart)
+- 🚨 **Alert otomatis** — deteksi anomali volume lalu lintas (rolling mean ± N x standar deviasi) tanpa model tambahan
+- 🎯 **Editor garis interaktif** — tarik garis penghitung & lock line langsung di atas frame CCTV
+- 🗺️ **Track overlay** — jejak lintasan kendaraan di atas frame
+- 💾 **Persistensi** — SQLite + ring buffer in-memory, agregasi per jam via `/analytics`
+- 🐳 **Docker-ready** — `docker compose up` menyalakan backend (GPU passthrough) + dashboard Nginx
 
 ---
 
-## Architecture
+## 🧰 Tech Stack
+
+| Layer | Teknologi | Peran |
+|-------|-----------|-------|
+| CV / Inference | **YOLOv8s** (ONNX) + `onnxruntime-gpu` 1.22 | Deteksi kendaraan pada frame |
+| Tracking | **supervision** (ByteTrack) | Pelacakan antar frame + counting |
+| Video | **OpenCV** | Capture frame, resize, encode JPEG |
+| Backend | **FastAPI** + Uvicorn | REST API + WebSocket (video & metrics) |
+| Database | **SQLite** (`aiosqlite`) + ring buffer in-memory | Penyimpanan metrik histori |
+| Anomaly | **SciPy** rolling stats | Baseline statistik alert volume |
+| Frontend | **React 18** + **Vite 5** | Dashboard SPA |
+| Charts | **Recharts** | Grafik jumlah, kecepatan, komposisi kelas |
+| Styling | **Tailwind CSS 3** | Tema aspal–marka jalan (asphalt/lane tokens) |
+| WebSocket client | native `WebSocket` API | Stream frame video biner + metrik JSON |
+| Model training | **PyTorch** + **Ultralytics** | Fine-tune YOLOv8s (Colab) + export ONNX |
+| Testing | **pytest** + httpx | Unit & API tests |
+| Deployment | **Docker Compose** (NVIDIA runtime) | Orkestrasi backend + dashboard |
+
+---
+
+## 🏗️ Arsitektur
 
 ```
-Video Source (file / webcam / RTSP / demo)
-    │
-    ▼
-OpenCV Frame Capture          core/video_source.py
-    │
-    ▼
-YOLOv8s — ONNX Runtime GPU   core/detector.py
-    │
-    ▼
-ByteTrack (supervision)       core/tracker.py
-    │
-    ▼
-Analytics Engine              core/analytics.py
-  ├── multi-line vehicle counting
-  ├── speed estimation (px/frame × calibration → km/h)
-  ├── class breakdown
-  ├── anomaly detection (surge + stopped vehicle)
-  └── drift monitoring (confidence rolling baseline)
-    │
-    ▼
-FastAPI Backend               api/
-  ├── WebSocket /ws/video     — binary JPEG frames
-  ├── WebSocket /ws/metrics   — JSON MetricsMessage per frame
-  └── REST      /analytics/*  — historical aggregates
-    │
-    ▼
-React Dashboard               dashboard/
-  ├── VideoFeed canvas
-  ├── KPI cards (StatsCards)
-  ├── VehicleCountChart
-  ├── SpeedDistribution
-  ├── ClassBreakdown
-  ├── AlertsPanel
-  └── TrackOverlay canvas
-    │
-    ▼
-SQLite (hourly aggregates) + in-memory ring buffer (last 5 min)
+CCTV / MP4 / RTSP
+      │  (OpenCV frame capture)
+      ▼
+┌─────────────────────────────────────────────┐
+│ core/pipeline.py   ── orchestration loop    │
+│   core/detector.py   YOLOv8s ONNX inference │
+│   core/tracker.py    ByteTrack + ID lock    │
+│   core/analytics.py  counting, speed, alert │
+└─────────────────────────────────────────────┘
+      │ ring buffer + SQLite
+      ▼
+FastAPI (api/)
+   ├─ REST  : /health /pipeline/* /analytics/*
+   └─ WS    : /ws/video (JPEG biner)  /ws/metrics (JSON)
+      │
+      ▼
+React Dashboard (dashboard/)
+   ├─ VideoFeed / StatsCards / VehicleCountChart
+   ├─ SpeedDistribution / ClassBreakdown
+   └─ TrafficFlowMap / PipelineControl / AlertsPanel
 ```
 
 ---
 
-## Quick Start — Demo Mode (no model required)
+## 🚦 Cara Menjalankan (Windows — Satu Klik)
 
-### Docker (recommended)
+1. **Klik dua kali `start_app.bat`** — script otomatis:
+   - Membuat virtual environment (`venv/`) dan menginstall dependency Python (hanya saat pertama kali)
+   - Menyalakan backend FastAPI di `http://localhost:8000`
+   - Menyalakan frontend Vite di `http://localhost:5173`
+   - Membuka browser ke dashboard
+
+2. Hentikan semuanya dengan `Ctrl+C` di jendela terminal, atau klik dua kali **`stop_app.bat`**.
+
+> ⚠️ Perlu **Python 3.10+** dan **Node.js 18+**. GPU NVIDIA + CUDA 12 opsional — backend tetap jalan di CPU (lebih lambat).
+
+### Manual (tanpa .bat)
 
 ```bash
-git clone https://github.com/salvirezwan/Traffic-Video-Analytics-Project.git
-cd Traffic-Video-Analytics-Project
-docker compose up --build
-```
-
-Open **http://localhost** in your browser, then click **Demo** in the Pipeline Control bar.
-
-> The `deploy.resources` GPU block in `docker-compose.yml` is silently ignored if `nvidia-container-toolkit` is not installed — CPU inference and demo mode work fine without it.
-
-### Local development
-
-**Prerequisites:** Python 3.10+, Node 20+
-
-```bash
-# 1. Backend
+# Terminal 1 — Backend
 python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+venv\Scripts\activate
 pip install -r requirements.txt
-
-cp .env.example .env            # edit as needed
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
-# 2. Frontend (separate terminal)
+# Terminal 2 — Frontend
 cd dashboard
 npm install
 npm run dev
 ```
 
-Open **http://localhost:3000**, click **Demo**.
+Buka `http://localhost:5173`, isi sumber video di panel kontrol, tekan **Start**.
 
----
-
-## Full Setup — Live Video with GPU Inference
-
-### 1. Requirements
-
-- NVIDIA GPU with CUDA 12.x support
-- CUDA Toolkit 12.6 + cuDNN 9.x installed
-- `onnxruntime-gpu` (included in `requirements.txt`)
-
-### 2. Obtain weights
-
-Train on Colab (see [Training](#training)) or download a pre-exported file and place it at:
-
-```
-models/weights/yolov8s_traffic.onnx
-```
-
-### 3. Configure
+### Docker
 
 ```bash
-cp .env.example .env
-```
-
-Key variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `MODEL_PATH` | `models/weights/yolov8s_traffic.onnx` | Path to ONNX weights |
-| `VIDEO_SOURCE` | `data/sample_videos/traffic.mp4` | File path, `0` for webcam, `rtsp://…` |
-| `CONFIDENCE_THRESHOLD` | `0.4` | Detection confidence (0–1) |
-| `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
-| `METERS_PER_PIXEL` | `0.05` | Speed calibration constant |
-| `JPEG_QUALITY` | `80` | Video stream compression (1–100) |
-
-### 4. Run
-
-```bash
-# Docker (with GPU)
 docker compose up --build
-
-# Local
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-# Frontend: cd dashboard && npm run dev
-```
-
-### 5. Use the dashboard
-
-1. Set **Source** (file path, `0` for webcam, or RTSP URL) in the Pipeline Control bar.
-2. Adjust **Confidence** threshold as needed (lower = more detections, more false positives).
-3. Optionally expand **Lines** to define counting tripwires — enter `(x1, y1) → (x2, y2)` in source frame pixels.
-4. Click **Start**.
-
----
-
-## Counting Lines
-
-Lines are configured per-run via the dashboard UI or directly via the API. Each line has a name and two endpoints in the **source frame's pixel coordinate system**.
-
-A vehicle is counted when its center point crosses from one side of the line to the other.
-
-```json
-POST /pipeline/start
-{
-  "source": "data/sample_videos/traffic.mp4",
-  "confidence_threshold": 0.35,
-  "counting_lines": [
-    { "name": "north", "x1": 0, "y1": 200, "x2": 1280, "y2": 200 },
-    { "name": "south", "x1": 0, "y1": 500, "x2": 1280, "y2": 500 }
-  ]
-}
-```
-
-Live counts per line are broadcast on `/ws/metrics` → `count_per_line` and rendered on the Track Overlay canvas.
-
----
-
-## API Reference
-
-Interactive docs available at **http://localhost:8000/docs**
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/pipeline/start` | Start (or restart) the pipeline |
-| `POST` | `/pipeline/stop` | Stop the running pipeline |
-| `GET` | `/pipeline/status` | Current pipeline state |
-| `WS` | `/ws/video` | Binary JPEG frame stream |
-| `WS` | `/ws/metrics` | JSON `MetricsMessage` per frame |
-| `GET` | `/analytics/recent` | Last N minutes from ring buffer |
-| `GET` | `/analytics/hourly` | Hourly aggregates from SQLite |
-| `GET` | `/health` | Health check |
-
----
-
-## Training
-
-All training happens on Google Colab (free T4 GPU). The local machine is inference-only.
-
-```
-notebooks/
-├── 01_data_prep.ipynb      # Download UA-DETRAC, convert to YOLO format
-└── 02_training.ipynb       # Train YOLOv8s, evaluate, export to ONNX
-```
-
-**Workflow:**
-
-1. Open `notebooks/02_training.ipynb` in Colab.
-2. Run all cells — trains YOLOv8s on UA-DETRAC, saves `.pt` + `.onnx` to Google Drive.
-3. Download `yolov8s_traffic.onnx` to `models/weights/`.
-4. Restart the API — it loads the model automatically on startup.
-
-**Hardware used:**
-- Training: Google Colab T4 (15 GB VRAM), `batch_size=16`
-- Inference: NVIDIA RTX 3050 Ti (4 GB VRAM) — YOLOv8s ONNX fits comfortably
-
----
-
-## Project Structure
-
-```
-traffic-video-analytics-project/
-├── core/                   # CV + analytics engine
-│   ├── detector.py         # ONNX/YOLOv8 inference wrapper
-│   ├── tracker.py          # ByteTrack via supervision
-│   ├── video_source.py     # OpenCV frame capture abstraction
-│   ├── demo_generator.py   # Synthetic traffic scene (no model needed)
-│   ├── pipeline.py         # Orchestrator: detect → track → analyse
-│   └── analytics.py        # Counting, speed, anomalies, drift monitor
-├── api/                    # FastAPI backend
-│   ├── main.py
-│   ├── pipeline_manager.py # Singleton: owns Pipeline, fans out to WS clients
-│   ├── database.py         # SQLite + in-memory ring buffer
-│   ├── schemas.py          # Pydantic v2 models
-│   ├── routes/
-│   │   ├── stream.py       # WebSocket video + metrics, pipeline control
-│   │   ├── analytics.py    # Historical data REST endpoints
-│   │   └── health.py
-│   └── Dockerfile
-├── dashboard/              # React + Vite frontend
-│   ├── src/
-│   │   ├── components/     # VideoFeed, StatsCards, charts, AlertsPanel, …
-│   │   └── hooks/
-│   │       └── useWebSocket.js
-│   ├── nginx.conf          # Reverse proxy for Docker deployment
-│   └── Dockerfile
-├── models/
-│   ├── weights/            # .onnx / .pt files (gitignored)
-│   └── export/             # ONNX export scripts
-├── notebooks/              # Colab training notebooks
-├── tests/                  # pytest test suite
-├── docker-compose.yml
-├── requirements.txt
-└── .env.example
+# backend  : http://localhost:8000/docs
+# dashboard: http://localhost:80
 ```
 
 ---
 
-## Tech Stack
+## ⚙️ Konfigurasi
 
-| Layer | Technology |
-|---|---|
-| Detection model | YOLOv8s (Ultralytics) fine-tuned on UA-DETRAC → ONNX |
-| Inference runtime | ONNX Runtime with CUDAExecutionProvider |
-| Tracking | ByteTrack via `supervision` |
-| Video I/O | OpenCV |
-| Backend | FastAPI + uvicorn + WebSockets |
-| Data models | Pydantic v2 |
-| Persistence | SQLite via `aiosqlite` + in-memory ring buffer |
-| Frontend | React 18 + Vite + Tailwind CSS + Recharts |
-| Container | Docker + Docker Compose |
-| Training | Google Colab T4 GPU |
+Semua konfigurasi lewat file `.env` (salin dari `.env.example`):
+
+| Variabel | Default | Keterangan |
+|----------|---------|------------|
+| `MODEL_PATH` | `models/weights/yolov8s_traffic.onnx` | Bobot model deteksi (ONNX) |
+| `VIDEO_SOURCE` | `data/sample_videos/traffic.mp4` | Path file / `0` webcam / `rtsp://` |
+| `CONFIDENCE_THRESHOLD` | `0.4` | Batas minimum confidence deteksi |
+| `IOU_THRESHOLD` | `0.5` | NMS IoU threshold |
+| `TARGET_CLASSES` | `2,3,5,7` | COCO: 2=mobil, 3=motor, 5=bus, 7=truk |
+| `COUNTING_LINES` | — | Garis penghitung JSON `[{name,x1,y1,x2,y2}]` |
+| `LOCK_LINES` | — | Garis pengunci label (kunci kelas sebelum garis hitung) |
+| `METERS_PER_PIXEL` | `0.05` | Kalibrasi estimasi kecepatan |
+| `ANOMALY_*` | — | Window & threshold deteksi anomali volume |
+| `METRICS_INTERVAL_MS` | `500` | Interval broadcast metrik WebSocket |
+| `JPEG_QUALITY` | `80` | Kualitas frame JPEG stream video |
 
 ---
 
-## Development
+## 🧪 Testing
 
 ```bash
-# Backend tests
-pytest tests/ -v
-
-# Frontend lint
-cd dashboard && npm run lint
+venv\Scripts\activate
+pytest
 ```
 
+Mencakup unit test engine (`tests/test_core.py`), test API (`tests/test_api.py`), dan test mekanisme **ID lock** (`test_id_lock.py`).
+
+---
+
+## 🗂️ Struktur Proyek
+
+```
+RoadsEye/
+├── api/                      # Backend FastAPI
+│   ├── main.py               # Entry point, lifespan, CORS
+│   ├── pipeline_manager.py   # Siklus hidup pipeline (start/stop)
+│   ├── database.py           # SQLite (aiosqlite) — metrik
+│   ├── schemas.py            # Skema Pydantic
+│   └── routes/
+│       ├── health.py         # GET /health
+│       ├── stream.py         # Kontrol pipeline + WS video/metrics
+│       └── analytics.py      # Agregasi recent / hourly / summary
+├── core/                     # Engine CV
+│   ├── pipeline.py           # Orkestrasi frame loop
+│   ├── detector.py           # YOLOv8s ONNX inference
+│   ├── tracker.py            # ByteTrack + ID lock
+│   ├── analytics.py          # Counting, speed, anomaly
+│   ├── video_source.py       # Source file/webcam/RTSP
+│   └── demo_generator.py     # Generator video demo
+├── dashboard/                # Frontend React
+│   ├── src/
+│   │   ├── App.jsx           # Layout rail + monitoring deck
+│   │   ├── components/       # VideoFeed, StatsCards, charts...
+│   │   └── hooks/useWebSocket.js
+│   └── Dockerfile            # Build + Nginx serve
+├── models/weights/           # yolov8s_traffic.onnx
+├── data/                     # traffic.db + sample video
+├── notebooks/                # EDA & training (Colab)
+├── tests/                    # pytest: core, api, id_lock
+├── start_app.bat             # Launcher satu-klik Windows
+├── stop_app.bat              # Penghenti proses
+├── requirements.txt
+├── .env.example
+└── docker-compose.yml
+```
+
+---
+
+## 📡 API & WebSocket
+
+API playground interaktif: **`http://localhost:8000/docs`** (Swagger UI).
+
+| Endpoint | Method | Deskripsi |
+|----------|--------|-----------|
+| `/health` | GET | Health check API |
+| `/pipeline/start` | POST | Mulai pipeline deteksi |
+| `/pipeline/stop` | POST | Hentikan pipeline |
+| `/pipeline/status` | GET | Status pipeline + FPS live |
+| `/pipeline/lines` | GET/POST | Ambil/set garis counting & lock |
+| `/analytics/recent` | GET | Metrik terkini (ring buffer) |
+| `/analytics/hourly` | GET | Agregasi volume per jam |
+| `/analytics/summary` | GET | Ringkasan periodik (total, rata-rata, puncak) |
+| `ws /ws/video` | WebSocket | Stream frame JPEG biner (live CCTV) |
+| `ws /ws/metrics` | WebSocket | Broadcast metrik JSON tiap 500 ms |
+
+---
+
+## 📊 Charts di Dashboard
+
+| Panel | Chart | Sumber data |
+|-------|-------|-------------|
+| Komposisi Kelas | **Donut chart** (mobil/motor/bus/truk) | `metrics.count_per_class` |
+| Vehicles In Frame | Line/area chart time-series | `metrics.history` |
+| Speed Distribution | Line/area chart | `metrics.history` |
+| Track Overlay | Canvas overlay jejak kendaraan | `metrics.tracks` |
+
+---
+
+## 🎯 Model
+
+`yolov8s_traffic.onnx` — fine-tune YOLOv8s pada kelas kendaraan dari dataset lalu-lintas (Colab, lihat `notebooks/02_training.ipynb`). Pipeline inference pintar:
+
+1. Frame di-resize ke input size model
+2. ONNX Runtime (CUDA EP → fallback CPU)
+3. NMS di sisi Python; hanya kelas `{2,3,5,7}`
+4. ByteTrack assign ID + **lock line** membekukan label kelas antar frame
+5. Garis counting menghitung volum per kelas per arah
+
+---
+
+## 🤝 Kontribusi
+
+1. Fork & clone
+2. `pip install -r requirements.txt && (cd dashboard && npm install)`
+3. Buat branch fitur → commit → PR 
+
+Praktik: `pytest` wajib hijau sebelum merge.
+
+---
+
+## 📜 Lisensi
+
+MIT.
