@@ -1,6 +1,6 @@
 # 🛣️ RoadsEye — CCTV Traffic Analytics Dashboard
 
-Real-time vehicle detection, tracking, and traffic analytics dashboard — deteksi kendaraan, penghitungan volume, estimasi kecepatan, dan alert otomatis langsung dari feed CCTV, dibungkus UI bertema aspal & marka jalan. Dibangun untuk Kab. Tangerang — Dinas Perhubungan.
+Real-time vehicle detection, tracking, and traffic analytics dashboard — deteksi kendaraan, penghitungan volume, estimasi kecepatan, dan alert otomatis langsung dari feed CCTV.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -233,6 +233,4 @@ Praktik: `pytest` wajib hijau sebelum merge.
 
 ---
 
-## 📜 Lisensi
 
-MIT.
