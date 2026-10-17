@@ -16,6 +16,7 @@ import ClassBreakdown   from './components/ClassBreakdown'
 import AlertsPanel      from './components/AlertsPanel'
 import TrafficFlowMap   from './components/TrafficFlowMap'
 import PipelineControl  from './components/PipelineControl'
+import HistoryPanel     from './components/HistoryPanel'
 
 const API = '/api'
 
@@ -123,6 +124,15 @@ export default function App() {
 
   const pipelineRunning = status?.running ?? false
 
+  // Persistent history (SQLite) — refreshed on mount, every 30 s,
+  // and whenever detection stops (session close) — never resets.
+  const [historyKey, setHistoryKey] = useState(0)
+  useEffect(() => {
+    setHistoryKey((k) => k + 1)
+    const id = setInterval(() => setHistoryKey((k) => k + 1), 30_000)
+    return () => clearInterval(id)
+  }, [pipelineRunning])
+
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
       <ControlRail status={status} connected={connected} onRefresh={refresh} latest={latest} />
@@ -155,6 +165,12 @@ export default function App() {
         <section>
           <RailTitle>Track Overlay</RailTitle>
           <TrafficFlowMap latest={latest} pipelineStatus={status} />
+        </section>
+
+        {/* Persistent history (SQLite) — historical totals + event table */}
+        <section>
+          <RailTitle>Riwayat Persisten</RailTitle>
+          <HistoryPanel refreshKey={historyKey} />
         </section>
 
         {/* Alerts — full-width strip */}

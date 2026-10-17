@@ -54,6 +54,8 @@ class FrameMetrics:
     alerts: list[str]
     # Raw tracks for frontend overlay
     tracks: list[dict[str, Any]]
+    # Confirmed counting crossings this frame (persisted as vehicle_events)
+    crossings: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -69,8 +71,12 @@ class CountingLine:
     """A line segment that counts vehicles crossing it.
 
     The line is defined by two points (x1,y1)→(x2,y2) in pixel coords.
-    A crossing is detected when a track's centre moves from one side to the other.
+    A crossing is detected when a track's centre moves from one side to the
+    other, crossing the hysteresis band around the line — a vehicle hovering
+    or oscillating within ±HYSTERESIS_PX of the line cannot re-trigger.
     """
+
+    HYSTERESIS_PX = 15.0   # dead-band around the line (anti-oscillation)
 
     def __init__(self, p1: tuple[int, int], p2: tuple[int, int]) -> None:
         self.p1 = np.array(p1, dtype=float)
@@ -78,23 +84,29 @@ class CountingLine:
         self._prev_sides: dict[int, float] = {}
         self.total_count: int = 0
         self.count_per_class: dict[str, int] = defaultdict(int)
+        # (track, prev_side, side) for each crossing in the LAST update() call
+        self.last_crossings: list[tuple[Track, float, float]] = []
 
     def update(self, tracks: list[Track]) -> list[Track]:
         """Check each track for a crossing. Returns newly-crossed tracks."""
         crossed = []
         current_ids = {t.track_id for t in tracks}
+        self.last_crossings = []
 
         for track in tracks:
             cx, cy = track.center
-            side = self._side(cx, cy)
+            signed = self._signed_dist(cx, cy)
 
-            prev = self._prev_sides.get(track.track_id)
-            if prev is not None and prev != 0 and side != 0 and prev != side:
-                self.total_count += 1
-                self.count_per_class[track.class_name] += 1
-                crossed.append(track)
-
-            if side != 0:
+            # Only register a side when the track is clearly OFF the line —
+            # jitters/oscillation inside the dead-band never re-arm a count.
+            if abs(signed) >= self.HYSTERESIS_PX:
+                side = float(np.sign(signed))
+                prev = self._prev_sides.get(track.track_id)
+                if prev is not None and prev != 0 and prev != side:
+                    self.total_count += 1
+                    self.count_per_class[track.class_name] += 1
+                    crossed.append(track)
+                    self.last_crossings.append((track, prev, side))
                 self._prev_sides[track.track_id] = side
 
         # Clean up lost tracks
@@ -108,6 +120,15 @@ class CountingLine:
         dx = self.p2[0] - self.p1[0]
         dy = self.p2[1] - self.p1[1]
         return float(np.sign(dx * (py - self.p1[1]) - dy * (px - self.p1[0])))
+
+    def _signed_dist(self, px: float, py: float) -> float:
+        """Signed perpendicular distance from the line (pixels)."""
+        dx = self.p2[0] - self.p1[0]
+        dy = self.p2[1] - self.p1[1]
+        norm = np.hypot(dx, dy)
+        if norm == 0:
+            return 0.0
+        return float((dx * (py - self.p1[1]) - dy * (px - self.p1[0])) / norm)
 
 
 # ── Speed estimator ──────────────────────────────────────────────────────────
@@ -325,11 +346,25 @@ class AnalyticsEngine:
         count_per_line: dict[str, int] = {}
         total_count  = 0
         count_per_class: dict[str, int] = {}
+        crossing_events: list[dict[str, Any]] = []
+        frame_ts = time.time()
 
         for name, line in self._lines:
             line.update(tracks)
             count_per_line[name] = line.total_count
             total_count += line.total_count
+
+            # Confirmed crossings (prev_side → side) — persisted per event
+            for track, prev, side in line.last_crossings:
+                crossing_events.append({
+                    "line_name":   name,
+                    "track_id":    track.track_id,
+                    "class_name":  track.class_name,
+                    "class_id":    track.class_id,
+                    "confidence":  round(track.confidence, 3),
+                    "direction":   "positive" if side > prev else "negative",
+                    "timestamp":   frame_ts,
+                })
 
         # Use the first line's per-class breakdown for backward compat
         if self._lines:
@@ -382,6 +417,7 @@ class AnalyticsEngine:
             speed_samples=recent_speeds,
             alerts=alert_strings,
             tracks=tracks_data,
+            crossings=crossing_events,
         )
 
     @property

@@ -26,6 +26,17 @@ class TrackData(BaseModel):
     speed_kmh: float | None = None
 
 
+class CrossingData(BaseModel):
+    """One confirmed counting crossing in a frame (persisted to SQLite)."""
+    line_name: str
+    track_id: int
+    class_name: str
+    class_id: int
+    confidence: float
+    direction: str          # "positive" | "negative" — side change across the line
+    timestamp: float
+
+
 class MetricsMessage(BaseModel):
     """JSON payload pushed over /ws/metrics each processed frame."""
     timestamp: float
@@ -42,6 +53,8 @@ class MetricsMessage(BaseModel):
     alerts: list[str]
     # Tracks for frontend overlay
     tracks: list[TrackData]
+    # Confirmed counting crossings this frame
+    crossings: list[CrossingData] = Field(default_factory=list)
 
     @classmethod
     def from_frame_metrics(cls, m: Any) -> "MetricsMessage":
@@ -57,6 +70,7 @@ class MetricsMessage(BaseModel):
             speed_samples=m.speed_samples,
             alerts=m.alerts,
             tracks=[TrackData(**t) for t in m.tracks],
+            crossings=[CrossingData(**c) for c in m.crossings],
         )
 
 
@@ -130,6 +144,64 @@ class AnalyticsSummaryResponse(BaseModel):
 class RecentMetricsResponse(BaseModel):
     window_seconds: int
     frames: list[MetricsMessage]
+
+
+# ── REST: persistent event history (Phase 1) ─────────────────────────────────
+
+class VehicleEventRecord(BaseModel):
+    """One persisted confirmed counting event (vehicle_events row)."""
+    event_id: str
+    camera_id: str
+    session_id: str
+    track_id: int
+    vehicle_type: str
+    timestamp_utc: str
+    timestamp_epoch: float
+    direction: str | None = None
+    confidence: float | None = None
+    counting_line_id: str
+    created_at_utc: str
+
+
+class EventsPage(BaseModel):
+    """Paginated event history (GET /analytics/events)."""
+    total: int
+    page: int
+    page_size: int
+    items: list[VehicleEventRecord]
+
+
+class HourlyBucket(BaseModel):
+    """Events bucketed per Asia/Jakarta local hour."""
+    hour: str
+    total: int
+    count_per_class: dict[str, int]
+
+
+class HistorySummaryResponse(BaseModel):
+    """Cumulative historical totals from persisted events (never reset)."""
+    total_events: int
+    count_per_class: dict[str, int]
+    count_per_line: dict[str, int]
+    hourly: list[HourlyBucket]
+    peak_hour: str | None
+    peak_count: int
+    first_event_utc: str | None
+    last_event_utc: str | None
+
+
+class ProcessingSessionRecord(BaseModel):
+    session_id: str
+    camera_id: str
+    started_at_utc: str
+    ended_at_utc: str | None
+    status: str
+    source_detail: str | None = None
+
+
+class BackupResponse(BaseModel):
+    path: str
+    created: bool = True
 
 
 # ── REST: pipeline status ─────────────────────────────────────────────────────

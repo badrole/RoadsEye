@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 from core.pipeline import Pipeline, PipelineConfig
 from api.schemas import CountingLineStatus, MetricsMessage, PipelineStatus
@@ -30,6 +31,10 @@ class PipelineManager:
 
         self._start_time: float = 0.0
         self._frame_index: int = 0
+
+        # Persistence (Phase 1): one processing session per pipeline start
+        self._session_id: str | None = None
+        self._camera_id: str | None = None
 
         # Subscriber queues — one per connected WebSocket client
         self._video_queues: list[asyncio.Queue[bytes]] = []
@@ -65,6 +70,14 @@ class PipelineManager:
             if self.running:
                 await self._stop_pipeline()
 
+            # New processing session — each start gets a fresh identity,
+            # tracker resets and counting state restart at zero (live view).
+            self._session_id = uuid.uuid4().hex
+            self._camera_id = str(config.source)
+
+            import api.events_db as events_db
+            events_db.open_session(self._session_id, self._camera_id, source_detail="RoadsEye pipeline")
+
             self._config = config
             self._pipeline = Pipeline(config)
             self._frame_index = 0
@@ -74,6 +87,23 @@ class PipelineManager:
     async def stop(self) -> None:
         async with self._lock:
             await self._stop_pipeline()
+
+    async def _stop_pipeline(self) -> None:
+        if self._pipeline:
+            self._pipeline.stop()
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._task = None
+        self._pipeline = None
+        # End the processing session — historical events are never deleted.
+        if self._session_id:
+            import api.events_db as events_db
+            events_db.close_session(self._session_id, status="stopped")
+            self._session_id = None
 
     def set_lines(self, counting_lines) -> None:
         """Live update of counting lines on the running pipeline."""
@@ -111,26 +141,29 @@ class PipelineManager:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    async def _stop_pipeline(self) -> None:
-        if self._pipeline:
-            self._pipeline.stop()
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        self._task = None
-        self._pipeline = None
-
     async def _run_loop(self) -> None:
         """Async loop: pull frames from pipeline, fan-out to subscribers."""
         from api.database import ring_push, upsert_hourly
+        import api.events_db as events_db
 
         try:
             async for jpeg_bytes, raw_metrics in self._pipeline.run_async():
                 self._frame_index += 1
                 metrics = MetricsMessage.from_frame_metrics(raw_metrics)
+
+                # Persist confirmed counting crossings (Phase 1) — non-blocking
+                if metrics.crossings and self._session_id:
+                    for c in metrics.crossings:
+                        events_db.writer.enqueue(events_db.make_event(
+                            camera_id=self._camera_id or "unknown",
+                            session_id=self._session_id,
+                            track_id=c.track_id,
+                            vehicle_type=c.class_name,
+                            confidence=c.confidence,
+                            direction=c.direction,
+                            counting_line_id=c.line_name,
+                            timestamp_epoch=c.timestamp,
+                        ))
 
                 # Persist
                 ring_push(metrics)

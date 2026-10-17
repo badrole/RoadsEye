@@ -39,6 +39,18 @@ async def lifespan(app: FastAPI):
     await init_db()
     print("[API] Database initialised.")
 
+    # Persistent event DB (Phase 1)
+    import api.events_db as events_db
+    try:
+        resolved = events_db.init_events_db()
+        print(f"[API] Events DB (persistent history): {resolved}")
+    except Exception as exc:
+        print(f"[API] ERROR: could not open events database at {events_db.DB_PATH.resolve()}: {exc}")
+        print("[API]       Fix the database file/path, then restart. Refusing to silently create a fresh one.")
+        raise
+    events_db.writer.start()
+    print("[API] Event writer started.")
+
     # Auto-start pipeline if VIDEO_SOURCE env var is set
     source = os.environ.get("VIDEO_SOURCE", "").strip()
     if source:
@@ -84,6 +96,11 @@ async def lifespan(app: FastAPI):
     from api.pipeline_manager import manager
     await manager.stop()
     print("[API] Pipeline stopped.")
+
+    # Flush pending events to SQLite before exit
+    import api.events_db as events_db
+    events_db.writer.stop()
+    print("[API] Event writer flushed and stopped.")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────

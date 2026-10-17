@@ -20,7 +20,7 @@ Real-time vehicle detection, tracking, and traffic analytics dashboard — detek
 - 🚨 **Alert otomatis** — deteksi anomali volume lalu lintas (rolling mean ± N x standar deviasi) tanpa model tambahan
 - 🎯 **Editor garis interaktif** — tarik garis penghitung & lock line langsung di atas frame CCTV
 - 🗺️ **Track overlay** — jejak lintasan kendaraan di atas frame
-- 💾 **Persistensi** — SQLite + ring buffer in-memory, agregasi per jam via `/analytics`
+- 💾 **Persistensi** — ring buffer in-memory + **SQLite event historis** (`%LOCALAPPDATA%\RoadsEye\data\roadseye.db`): setiap crossing terkonfirmasi tersimpan permanen, total historis bertahan melewati refresh browser, stop deteksi, dan restart backend
 - 🐳 **Docker-ready** — `docker compose up` menyalakan backend (GPU passthrough) + dashboard Nginx
 
 ---
@@ -33,7 +33,7 @@ Real-time vehicle detection, tracking, and traffic analytics dashboard — detek
 | Tracking | **supervision** (ByteTrack) | Pelacakan antar frame + counting |
 | Video | **OpenCV** | Capture frame, resize, encode JPEG |
 | Backend | **FastAPI** + Uvicorn | REST API + WebSocket (video & metrics) |
-| Database | **SQLite** (`aiosqlite`) + ring buffer in-memory | Penyimpanan metrik histori |
+| Database | **SQLite** (`aiosqlite`) — ring buffer in-memory + event historis WAL | Metrik live + riwayat event persisten |
 | Anomaly | **SciPy** rolling stats | Baseline statistik alert volume |
 | Frontend | **React 18** + **Vite 5** | Dashboard SPA |
 | Charts | **Recharts** | Grafik jumlah, kecepatan, komposisi kelas |
@@ -195,6 +195,10 @@ API playground interaktif: **`http://localhost:8000/docs`** (Swagger UI).
 | `/analytics/recent` | GET | Metrik terkini (ring buffer) |
 | `/analytics/hourly` | GET | Agregasi volume per jam |
 | `/analytics/summary` | GET | Ringkasan periodik (total, rata-rata, puncak) |
+| `/analytics/history/summary` | GET | **Total historis kumulatif dari SQLite** (persisten) |
+| `/analytics/events` | GET | Riwayat event kendaraan — paginated + filter (tanggal WIB, kamera, kelas, sesi) |
+| `/analytics/sessions` | GET | Daftar sesi proses (start/stop) |
+| `/analytics/history/backup` | POST | Backup aman DB event (`VACUUM INTO`, WAL-safe) |
 | `ws /ws/video` | WebSocket | Stream frame JPEG biner (live CCTV) |
 | `ws /ws/metrics` | WebSocket | Broadcast metrik JSON tiap 500 ms |
 
