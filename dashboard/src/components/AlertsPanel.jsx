@@ -25,19 +25,20 @@ export default function AlertsPanel({ alerts }) {
   }, [alerts.length])
 
   return (
-    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex flex-col">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-gray-300">Alerts</h3>
+    <div className="panel relative p-4 flex flex-col overflow-hidden">
+      <div className="lane-stripe-h absolute top-0 left-0 right-0 opacity-80" />
+      <div className="flex items-center justify-between mt-2 mb-3">
+        <h3 className="road-label">Alerts</h3>
         {alerts.length > 0 && (
-          <span className="text-xs bg-red-600 text-white rounded-full px-2 py-0.5">
+          <span className="font-code text-xs bg-stop text-white rounded-sm px-2 py-0.5">
             {alerts.length}
           </span>
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto max-h-48 flex flex-col gap-2 pr-1">
+      <div className="flex-1 overflow-y-auto max-h-56 flex flex-col gap-2 pr-1">
         {alerts.length === 0 ? (
-          <div className="text-gray-500 text-sm text-center py-6">No alerts</div>
+          <div className="text-pip font-code text-xs tracking-widest uppercase text-center py-6">No alerts</div>
         ) : (
           alerts.map((a, i) => {
             const sev = parseSeverity(typeof a === 'string' ? a : a.message ?? '')

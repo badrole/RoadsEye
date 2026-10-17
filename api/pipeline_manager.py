@@ -75,6 +75,16 @@ class PipelineManager:
         async with self._lock:
             await self._stop_pipeline()
 
+    def set_lines(self, counting_lines) -> None:
+        """Live update of counting lines on the running pipeline."""
+        if self._pipeline is not None:
+            self._pipeline.set_lines(
+                counting_lines=list(counting_lines) if counting_lines is not None else None,
+            )
+        if self._config is not None:
+            if counting_lines is not None:
+                self._config.counting_lines = list(counting_lines)
+
     # ── Queue subscription ────────────────────────────────────────────────────
 
     def subscribe_video(self) -> asyncio.Queue[bytes]:

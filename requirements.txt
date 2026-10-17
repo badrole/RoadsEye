@@ -2,7 +2,15 @@
 ultralytics>=8.0.0          # YOLOv8 training + ONNX export (Colab only)
 torch>=2.0.0                # PyTorch (Colab only for training)
 torchvision>=0.15.0         # torchvision (Colab only)
-onnxruntime-gpu>=1.16.0     # ONNX inference with CUDA (local inference)
+onnxruntime-gpu==1.22.0     # ONNX inference — pin: 1.23+ switched to CUDA 13; 1.22 targets CUDA 12 (matches driver 566.x)
+nvidia-cuda-runtime-cu12    # CUDA 12 runtime rt for onnxruntime-gpu (pip wheels of the CUDA libs)
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+nvidia-cufft-cu12
+nvidia-curand-cu12
+nvidia-cusolver-cu12
+nvidia-cusparse-cu12
+nvidia-nvjitlink-cu12
 opencv-python>=4.8.0        # Frame capture + image ops
 supervision>=0.16.0         # ByteTrack, annotations, zone/line counting
 numpy>=1.24.0

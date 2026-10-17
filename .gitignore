@@ -75,3 +75,7 @@ htmlcov/
 *.tmp
 *.temp
 tmp/
+
+# Model weights (downloaded separately)
+yolov8s.pt
+*.pt

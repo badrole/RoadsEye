@@ -9,14 +9,14 @@
 import { useRef, useEffect } from 'react'
 
 const CLASS_COLORS = {
-  car:        '#3b82f6',
-  bus:        '#f59e0b',
-  truck:      '#10b981',
-  motorcycle: '#ef4444',
+  car:        '#FFD100',
+  bus:        '#EDEDEA',
+  truck:      '#9ca3af',
+  motorcycle: '#FF6B35',
 }
 
-// Colours for counting lines — cycled by index
-const LINE_COLORS = ['#22d3ee', '#facc15', '#c084fc', '#4ade80']
+// Lane colours for counting lines — cycled by index
+const LINE_COLORS = ['#FFD100', '#22d3ee', '#FF6B35', '#A78BFA']
 
 // Source frame dimensions assumed when no better info is available.
 // The demo generator emits 1280×720; live sources vary but 1280×720 is typical.
@@ -43,8 +43,8 @@ export default function TrafficFlowMap({ latest, pipelineStatus }) {
     const scaleX = CANVAS_W / SRC_W
     const scaleY = CANVAS_H / SRC_H
 
-    // ── Background grid ──────────────────────────────────────────────────────
-    ctx.strokeStyle = '#1f2937'
+    // ── Background: asphalt grid ─────────────────────────────────────────────
+    ctx.strokeStyle = '#232326'
     ctx.lineWidth   = 1
     for (let x = 0; x <= CANVAS_W; x += 64) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_H); ctx.stroke()
@@ -52,6 +52,12 @@ export default function TrafficFlowMap({ latest, pipelineStatus }) {
     for (let y = 0; y <= CANVAS_H; y += 36) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CANVAS_W, y); ctx.stroke()
     }
+    // lane divider down the middle
+    ctx.setLineDash([14, 10])
+    ctx.strokeStyle = 'rgba(255,209,0,0.25)'
+    ctx.lineWidth   = 2
+    ctx.beginPath(); ctx.moveTo(CANVAS_W / 2, 0); ctx.lineTo(CANVAS_W / 2, CANVAS_H); ctx.stroke()
+    ctx.setLineDash([])
 
     // ── Counting lines ───────────────────────────────────────────────────────
     countingLines.forEach((line, i) => {
@@ -111,10 +117,11 @@ export default function TrafficFlowMap({ latest, pipelineStatus }) {
   }, [tracks, countingLines, countPerLine])
 
   return (
-    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-      <h3 className="text-sm font-semibold text-gray-300 mb-3">
-        Track Overlay
-        <span className="ml-2 text-gray-500 font-normal text-xs">
+    <div className="panel relative p-4 overflow-hidden">
+      <div className="lane-stripe-h absolute top-0 left-0 right-0 opacity-80" />
+      <h3 className="road-label mt-2 mb-3">
+        Posisi Kendaraan
+        <span className="ml-2 text-pip font-normal">
           ({tracks.length} tracks
           {countingLines.length > 0 && ` · ${countingLines.length} line${countingLines.length > 1 ? 's' : ''}`}
           )
@@ -124,7 +131,7 @@ export default function TrafficFlowMap({ latest, pipelineStatus }) {
         ref={canvasRef}
         width={CANVAS_W}
         height={CANVAS_H}
-        className="w-full rounded bg-gray-950"
+        className="w-full rounded-sm bg-asphalt-deep"
       />
     </div>
   )

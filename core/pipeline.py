@@ -162,14 +162,25 @@ class Pipeline:
         self.setup()
         self._running = True
         loop = asyncio.get_event_loop()
+        read = None
+        if not self.config.demo_mode:
+            frame_iter = iter(self._source.stream(skip=self.config.skip_frames))
+
+            def read() -> tuple[np.ndarray, FrameMeta] | None:  # noqa: F811
+                try:
+                    return next(frame_iter)
+                except StopIteration:
+                    return None
         try:
             if self.config.demo_mode:
                 async for result in self._run_demo_async(loop):
                     yield result
             else:
-                for frame, meta in self._source.stream(skip=self.config.skip_frames):
-                    if not self._running:
+                while self._running:
+                    item = await loop.run_in_executor(None, read)
+                    if item is None:
                         break
+                    frame, meta = item
                     result = await loop.run_in_executor(
                         None, self._process_live_frame, frame, meta.index
                     )
@@ -208,6 +219,15 @@ class Pipeline:
         metrics    = self._analytics.update(tracks)
         annotated  = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
+
+    # ── Live line editing ─────────────────────────────────────────────────────
+
+    def set_lines(self, counting_lines: list[CountingLineSpec] | None = None) -> None:
+        """Update counting lines on a running pipeline (interactive editor)."""
+        if counting_lines is not None:
+            self.config.counting_lines = list(counting_lines)
+            if self._analytics is not None:
+                self._analytics.set_line_specs(counting_lines)
 
     # ── Annotation ────────────────────────────────────────────────────────────
 

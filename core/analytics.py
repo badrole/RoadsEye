@@ -401,3 +401,24 @@ class AnalyticsEngine:
                 p2=(int(line.p2[0]), int(line.p2[1])),
             ))
         return out
+
+    def set_line_specs(self, specs: list[CountingLineSpec]) -> None:
+        """Replace counting lines live (interactive editor).
+
+        Lines whose geometry is unchanged keep their counters; moved lines are
+        rebuilt with a zeroed counter (a moved line invalidates prior crossings).
+        """
+        old: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
+            name: (tuple(map(float, line.p1)), tuple(map(float, line.p2)))
+            for name, line in self._lines
+        }
+        self._lines = []
+        for spec in (specs or []):
+            self._lines.append((spec.name, CountingLine(spec.p1, spec.p2)))
+        new: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
+            name: ((float(l.p1[0]), float(l.p1[1])), (float(l.p2[0]), float(l.p2[1])))
+            for name, l in self._lines
+        }
+        for name in set(old) & set(new):
+            if old[name] != new[name]:
+                self._lines[[n for n, _ in self._lines].index(name)][1].total_count = 0

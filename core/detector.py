@@ -2,10 +2,15 @@
 
 Loads the exported ONNX model and runs inference on BGR numpy frames.
 Uses CUDAExecutionProvider when available, falls back to CPU.
+
+Supports both the 4-class traffic model (output shape (1, 8, N)) and the
+80-class COCO model (output shape (1, 84, N)). For COCO models only the
+traffic classes are considered and mapped onto the internal class ids.
 """
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -18,6 +23,14 @@ try:
 except ImportError as e:
     raise ImportError("onnxruntime-gpu is required: pip install onnxruntime-gpu") from e
 
+
+# COCO to traffic class mapping
+COCO_TRAFFIC_CLASSES: dict[int, int] = {
+    2: 0,  # car -> 0
+    5: 1,  # bus -> 1
+    3: 2,  # motorcycle -> 2
+    7: 3,  # truck -> 3
+}
 
 CLASS_NAMES: list[str] = ["car", "bus", "motorcycle", "truck"]
 
@@ -34,7 +47,7 @@ class Detection:
     class_name: str = field(init=False)
 
     def __post_init__(self) -> None:
-        self.class_name = CLASS_NAMES[self.class_id] if self.class_id < len(CLASS_NAMES) else "unknown"
+        self.class_name = CLASS_NAMES[self.class_id] if 0 <= self.class_id < len(CLASS_NAMES) else "vehicle"
 
     @property
     def xyxy(self) -> tuple[float, float, float, float]:
@@ -90,14 +103,37 @@ class Detector:
     # ── Setup ─────────────────────────────────────────────────────────────────
 
     def _load_session(self, path: Path) -> ort.InferenceSession:
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        providers = [
+            ("CUDAExecutionProvider", {"device_id": 0, "cudnn_conv_algo_search": "HEURISTIC"}),
+            "CPUExecutionProvider",
+        ]
+        self._register_cuda_dll_dirs()
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         session = ort.InferenceSession(str(path), sess_options=sess_opts, providers=providers)
         active = session.get_providers()
         using_gpu = "CUDAExecutionProvider" in active
         print(f"[Detector] Loaded {path.name} | {'GPU' if using_gpu else 'CPU'} | providers={active}")
+        if not using_gpu:
+            print("[Detector] HINT: RTX 3050 tidak terpakai (fallback CPU). "
+                  "Cek: pip wheel nvidia-*-cu12 terpasang & driver NVIDIA versi 566+.")
         return session
+
+    @staticmethod
+    def _register_cuda_dll_dirs() -> None:
+        """Windows: point the DLL loader at CUDA/cuDNN wheels installed via pip.
+
+        onnxruntime-gpu does not bundle CUDA; the nvidia-*-cu12 pip wheels carry
+        the DLLs, but Windows only finds them if their dirs are registered.
+        """
+        if sys.platform != "win32":
+            return
+        site_pkgs = Path(ort.__file__).parent.parent
+        for d in site_pkgs.glob("nvidia/*/bin"):
+            try:
+                os.add_dll_directory(str(d))
+            except OSError:
+                pass
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
@@ -160,13 +196,37 @@ class Detector:
         scores_for_nms: list[float] = []
         class_ids: list[int] = []
 
+        num_classes = preds.shape[1] - 4
+        is_coco = num_classes >= 80
+
+        # Vectorized pre-filter: drop anchors below confidence before the Python loop
+        cls_scores = preds[:, 4:]
+        if is_coco:
+            coco_cols = list(COCO_TRAFFIC_CLASSES.keys())
+            best_conf = cls_scores[:, coco_cols].max(axis=1)
+        else:
+            best_conf = cls_scores.max(axis=1)
+        preds = preds[best_conf >= self.confidence_threshold]
+
         for pred in preds:
             cx, cy, w, h = pred[:4]
             class_scores = pred[4:]
-            class_id = int(np.argmax(class_scores))
-            confidence = float(class_scores[class_id])
 
-            if confidence < self.confidence_threshold:
+            if is_coco:
+                # Find best score among traffic classes (car=2, bus=5, motorcycle=3, truck=7)
+                best_cls = -1
+                best_conf = -1.0
+                for coco_id, traffic_id in COCO_TRAFFIC_CLASSES.items():
+                    if class_scores[coco_id] > best_conf:
+                        best_conf = float(class_scores[coco_id])
+                        best_cls = traffic_id
+                confidence = best_conf
+                class_id = best_cls
+            else:
+                class_id = int(np.argmax(class_scores))
+                confidence = float(class_scores[class_id])
+
+            if confidence < self.confidence_threshold or class_id < 0:
                 continue
 
             # Convert from padded/scaled coords back to original frame coords

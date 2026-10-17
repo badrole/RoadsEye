@@ -24,18 +24,19 @@ export default function SpeedDistribution({ history }) {
   const data    = buildBins(samples)
 
   return (
-    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-      <h3 className="text-sm font-semibold text-gray-300 mb-3">Speed Distribution (km/h)</h3>
+    <div className="panel relative p-4 overflow-hidden">
+      <div className="lane-stripe-h absolute top-0 left-0 right-0 opacity-80" />
+      <h3 className="road-label mt-2 mb-3">Distribusi Kecepatan (km/h)</h3>
       <ResponsiveContainer width="100%" height={180}>
         <BarChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis dataKey="range" tick={{ fill: '#9ca3af', fontSize: 10 }} />
-          <YAxis allowDecimals={false} tick={{ fill: '#9ca3af', fontSize: 11 }} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2e" />
+          <XAxis dataKey="range" tick={{ fill: '#8f8f8a', fontSize: 10 }} />
+          <YAxis allowDecimals={false} tick={{ fill: '#8f8f8a', fontSize: 11 }} />
           <Tooltip
-            contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8 }}
+            contentStyle={{ background: '#101012', border: '1px solid #5c4f00', borderRadius: 2 }}
             formatter={(v) => [v, 'vehicles']}
           />
-          <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+          <Bar dataKey="count" fill="#FFD100" radius={[2, 2, 0, 0]} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>

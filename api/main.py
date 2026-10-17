@@ -6,14 +6,23 @@ Run with:
 Environment variables (see .env.example):
     MODEL_PATH            — path to ONNX weights file
     VIDEO_SOURCE          — default video source (file path, webcam index, RTSP URL)
-    CONFIDENCE_THRESHOLD  — detection confidence threshold (default 0.35)
+    CONFIDENCE_THRESHOLD  — detection confidence threshold (default 0.25)
     IOU_THRESHOLD         — NMS IoU threshold (default 0.45)
+    COUNTING_LINES        — JSON list of counting tripwires [{name,x1,y1,x2,y2}, ...]
+    LOCK_LINES            — JSON list of label-lock lines [{name,x1,y1,x2,y2}, ...]
     CORS_ORIGINS          — comma-separated allowed CORS origins (default *)
 """
 from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env file from project root
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,22 +42,41 @@ async def lifespan(app: FastAPI):
     # Auto-start pipeline if VIDEO_SOURCE env var is set
     source = os.environ.get("VIDEO_SOURCE", "").strip()
     if source:
+        import json
         from api.pipeline_manager import manager
         from core.pipeline import PipelineConfig
+        from core.analytics import CountingLineSpec
 
         try:
             src: str | int = int(source)
         except ValueError:
             src = source
 
+        counting_lines = []
+        raw_lines = os.environ.get("COUNTING_LINES", "").strip()
+        if raw_lines:
+            try:
+                parsed_lines = json.loads(raw_lines)
+                for item in parsed_lines:
+                    counting_lines.append(
+                        CountingLineSpec(
+                            name=item.get("name", "line"),
+                            p1=(int(item["x1"]), int(item["y1"])),
+                            p2=(int(item["x2"]), int(item["y2"])),
+                        )
+                    )
+            except Exception as e:
+                print(f"[API] Could not parse COUNTING_LINES from env: {e}")
+
         config = PipelineConfig(
             source=src,
             model_path=os.environ.get("MODEL_PATH") or None,
-            confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.35")),
+            confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.25")),
             iou_threshold=float(os.environ.get("IOU_THRESHOLD", "0.45")),
+            counting_lines=counting_lines,
         )
         await manager.start(config)
-        print(f"[API] Pipeline auto-started with source={src!r}")
+        print(f"[API] Pipeline auto-started with source={src!r}, count_lines={[l.name for l in counting_lines]}")
 
     yield
 
@@ -61,9 +89,9 @@ async def lifespan(app: FastAPI):
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="TrafficVision API",
+    title="RoadsEye API",
     description="Real-time vehicle detection, tracking, and traffic analytics.",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 

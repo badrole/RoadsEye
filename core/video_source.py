@@ -1,6 +1,7 @@
 """Video input abstraction — file, webcam, or RTSP stream."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,12 +54,36 @@ class VideoSource:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    # Low-latency FFMPEG flags for live/HLS sources. Without these the demuxer
+    # waits for full probe/analyze and buffers whole segments → read rate ~15fps
+    # instead of the source's 20+fps, and the feed lags behind live.
+    _LIVE_FFMPEG_OPTIONS = (
+        "fflags;nobuffer|flags;low_delay|analyzeduration;1000000|probesize;500000|"
+        "timeout;5000000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"
+    )
+
     def open(self) -> None:
-        self._cap = cv2.VideoCapture(self.source)
+        prev_opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+        if self._is_live_source(self.source):
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = self._LIVE_FFMPEG_OPTIONS
+        try:
+            self._cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        finally:
+            if prev_opts is None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev_opts
         if not self._cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {self.source!r}")
         self._frame_idx = 0
         self._t0 = time.monotonic()
+
+    @staticmethod
+    def _is_live_source(source: str | int) -> bool:
+        if isinstance(source, int):
+            return True
+        s = str(source).lower()
+        return s.startswith("rtsp") or s.startswith(("http://", "https://")) or ".m3u8" in s
 
     def close(self) -> None:
         if self._cap is not None:
@@ -95,8 +120,11 @@ class VideoSource:
 
     @property
     def is_live(self) -> bool:
-        """True for webcam or RTSP streams (no fixed frame count)."""
-        return isinstance(self.source, int) or str(self.source).startswith("rtsp")
+        """True for webcam, RTSP, or HLS/HTTP live streams (no fixed frame count)."""
+        if isinstance(self.source, int):
+            return True
+        s = str(self.source).lower()
+        return s.startswith("rtsp") or s.startswith("http://") or s.startswith("https://") or ".m3u8" in s
 
     # ── Reading ───────────────────────────────────────────────────────────────
 

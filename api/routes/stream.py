@@ -13,7 +13,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from api.pipeline_manager import manager
-from api.schemas import PipelineStartRequest, PipelineStatus
+from api.schemas import LinesResponse, LinesUpdateRequest, PipelineStartRequest, PipelineStatus
 from core.pipeline import PipelineConfig
 
 router = APIRouter(tags=["stream"])
@@ -52,6 +52,38 @@ async def stop_pipeline() -> PipelineStatus:
 @router.get("/pipeline/status", response_model=PipelineStatus)
 async def pipeline_status() -> PipelineStatus:
     return manager.status()
+
+
+# ── REST: live line editing ───────────────────────────────────────────────────
+
+def _status_lines(content) -> list:
+    from api.schemas import CountingLineStatus
+    out = []
+    for s in content:
+        out.append(CountingLineStatus(name=s.name, x1=int(s.p1[0]), y1=int(s.p1[1]),
+                                      x2=int(s.p2[0]), y2=int(s.p2[1])))
+    return out
+
+
+@router.get("/pipeline/lines", response_model=LinesResponse)
+async def get_lines() -> LinesResponse:
+    """Current counting line geometry (interactive editor hydration)."""
+    cfg = manager._config   # noqa: SLF001 — single-owner manager, read-only
+    counting = _status_lines(cfg.counting_lines) if cfg else []
+    return LinesResponse(counting_lines=counting)
+
+
+@router.post("/pipeline/lines", response_model=LinesResponse)
+async def update_lines(req: LinesUpdateRequest) -> LinesResponse:
+    """Update counting lines live — pipeline keeps running."""
+    counting = [c.as_spec() for c in req.counting_lines]
+
+    if not manager.running:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="Pipeline not running")
+
+    manager.set_lines(counting_lines=counting)
+    return LinesResponse(counting_lines=_status_lines(counting))
 
 
 # ── WebSocket: video frames ───────────────────────────────────────────────────

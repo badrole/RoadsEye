@@ -153,6 +153,16 @@ class PipelineStatus(BaseModel):
     counting_lines: list[CountingLineStatus] = Field(default_factory=list)
 
 
+class LinesUpdateRequest(BaseModel):
+    """POST /pipeline/lines — live geometry update for interactive editor."""
+    counting_lines: list[CountingLineConfig] = Field(default_factory=list)
+
+
+class LinesResponse(BaseModel):
+    """GET /pipeline/lines."""
+    counting_lines: list[CountingLineStatus] = Field(default_factory=list)
+
+
 # ── Health check ──────────────────────────────────────────────────────────────
 
 class HealthResponse(BaseModel):

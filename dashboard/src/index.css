@@ -1,13 +1,42 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 body {
-  @apply bg-gray-950 text-gray-100 min-h-screen;
-  font-family: 'Inter', system-ui, sans-serif;
+  @apply bg-asphalt text-chalk min-h-screen font-sans;
+  background-image:
+    linear-gradient(rgba(255,209,0,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,209,0,0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
 }
 
-/* Thin scrollbar */
+/* Thin scrollbar — lane coloured */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { @apply bg-gray-900; }
-::-webkit-scrollbar-thumb { @apply bg-gray-600 rounded; }
+::-webkit-scrollbar-track { @apply bg-asphalt-deep; }
+::-webkit-scrollbar-thumb { @apply bg-lane-dim rounded; }
+
+/* Section heading — road-sign style */
+.road-label {
+  @apply font-code text-[10px] uppercase tracking-[0.25em] text-pip;
+}
+.lane-stripe-h {
+  @apply h-[3px] w-full;
+  background: repeating-linear-gradient(90deg, #FFD100 0 26px, transparent 26px 48px);
+}
+
+/* Panel base */
+.panel {
+  @apply bg-asphalt-panel border border-lane-dim/40 rounded-sm;
+}
+
+button { @apply cursor-pointer select-none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

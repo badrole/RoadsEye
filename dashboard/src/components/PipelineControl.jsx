@@ -96,16 +96,14 @@ export default function PipelineControl({ status, onStatusChange }) {
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-      <h3 className="text-sm font-semibold text-gray-300 mb-3">Pipeline Control</h3>
-
-      <form onSubmit={handleStart} className="flex flex-wrap gap-3 items-end">
+    <div className="bg-asphalt-panel border border-lane-dim/40 rounded-sm p-3">
+      <form onSubmit={handleStart} className="flex flex-col gap-3">
         {/* Source */}
         <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-400">Source</label>
+          <label className="font-code text-[10px] uppercase tracking-[0.2em] text-pip">Source</label>
           <input
-            className="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200 w-52 focus:outline-none focus:border-blue-500"
-            placeholder="0  /path/to/video  rtsp://…"
+            className="bg-asphalt-deep border border-lane-dim/50 rounded-sm px-3 py-2 text-sm font-code text-chalk w-full focus:outline-none focus:border-lane transition-colors placeholder:text-pip/60"
+            placeholder="0 / file / rtsp://…"
             value={source}
             onChange={e => setSource(e.target.value)}
             disabled={isRunning}
@@ -114,13 +112,13 @@ export default function PipelineControl({ status, onStatusChange }) {
 
         {/* Confidence */}
         <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-400">Confidence</label>
+          <label className="font-code text-[10px] uppercase tracking-[0.2em] text-pip">Confidence</label>
           <input
             type="number"
             step="0.05"
             min="0.05"
             max="0.95"
-            className="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200 w-24 focus:outline-none focus:border-blue-500"
+            className="bg-asphalt-deep border border-lane-dim/50 rounded-sm px-3 py-2 text-sm font-code text-chalk w-full focus:outline-none focus:border-lane transition-colors"
             value={conf}
             onChange={e => setConf(e.target.value)}
             disabled={isRunning}
@@ -132,7 +130,7 @@ export default function PipelineControl({ status, onStatusChange }) {
           <button
             type="button"
             onClick={() => setShowLines(v => !v)}
-            className="px-3 py-1.5 rounded border border-gray-600 text-xs text-gray-400 hover:text-gray-200 hover:border-gray-400 transition-colors"
+            className="px-3 py-2 rounded-sm border border-lane-dim/50 font-code text-[10px] uppercase tracking-widest text-pip hover:text-lane hover:border-lane transition-colors"
           >
             {showLines ? 'Hide lines' : `Lines (${lines.length})`}
           </button>
@@ -144,18 +142,18 @@ export default function PipelineControl({ status, onStatusChange }) {
             <button
               type="submit"
               disabled={loading}
-              className="px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-sm font-medium disabled:opacity-50 transition-colors"
+              className="flex-1 px-4 py-2 rounded-sm bg-lane hover:bg-lane-bright text-asphalt font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors shadow-glowlane"
             >
-              {loading ? 'Starting…' : 'Start'}
+              {loading ? 'Starting…' : 'START'}
             </button>
             <button
               type="button"
               onClick={handleDemo}
               disabled={loading}
-              className="px-4 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-sm font-medium disabled:opacity-50 transition-colors"
+              className="flex-1 px-4 py-2 rounded-sm border border-lane-dim/60 hover:border-lane hover:text-lane text-pip font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors"
               title="Run synthetic demo — no ONNX model or camera required"
             >
-              Demo
+              DEMO
             </button>
           </div>
         ) : (
@@ -163,9 +161,9 @@ export default function PipelineControl({ status, onStatusChange }) {
             type="button"
             onClick={handleStop}
             disabled={loading}
-            className="px-4 py-1.5 rounded bg-red-600 hover:bg-red-500 text-sm font-medium disabled:opacity-50 transition-colors"
+            className="px-4 py-2 rounded-sm bg-stop hover:bg-red-500 text-white font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors"
           >
-            {loading ? 'Stopping…' : 'Stop'}
+            {loading ? 'Stopping…' : 'STOP'}
           </button>
         )}
       </form>
@@ -173,13 +171,13 @@ export default function PipelineControl({ status, onStatusChange }) {
       {/* Counting lines editor */}
       {showLines && !isRunning && (
         <div className="mt-3 space-y-2">
-          <div className="text-xs text-gray-500 mb-1">
-            Counting lines — vehicles are counted when they cross a line
+          <div className="font-code text-[10px] text-pip uppercase tracking-widest mb-1">
+            Counting lines — hitung saat menyeberang garis
           </div>
           {lines.map((line, i) => (
-            <div key={i} className="flex flex-wrap gap-2 items-center">
+            <div key={i} className="flex gap-1.5">
               <input
-                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 w-20"
+                className="bg-asphalt-deep border border-lane-dim/40 rounded-sm px-2 py-1 font-code text-xs text-chalk w-16"
                 placeholder="name"
                 value={line.name}
                 onChange={e => updateLine(i, 'name', e.target.value)}
@@ -188,7 +186,7 @@ export default function PipelineControl({ status, onStatusChange }) {
                 <input
                   key={f}
                   type="number"
-                  className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 w-16"
+                  className="bg-asphalt-deep border border-lane-dim/40 rounded-sm px-1.5 py-1 font-code text-xs text-chalk w-12"
                   placeholder={f}
                   value={line[f]}
                   onChange={e => updateLine(i, f, e.target.value)}
@@ -197,9 +195,9 @@ export default function PipelineControl({ status, onStatusChange }) {
               <button
                 type="button"
                 onClick={() => removeLine(i)}
-                className="text-xs text-red-500 hover:text-red-400"
+                className="font-code text-xs text-stop hover:text-red-400 px-1"
               >
-                ✕
+                X
               </button>
             </div>
           ))}
@@ -207,7 +205,7 @@ export default function PipelineControl({ status, onStatusChange }) {
             <button
               type="button"
               onClick={addLine}
-              className="text-xs text-blue-400 hover:text-blue-300"
+              className="font-code text-xs text-lane hover:text-lane-bright transition-colors"
             >
               + Add line
             </button>
@@ -215,12 +213,12 @@ export default function PipelineControl({ status, onStatusChange }) {
         </div>
       )}
 
-      {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
+      {error && <p className="mt-2 text-xs text-stop">{error}</p>}
 
       {status && (
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 font-code text-[10px] text-pip leading-relaxed break-all">
           {isRunning
-            ? `${status.demo_mode ? '[DEMO] ' : ''}Running — frame ${status.frame_index} · ${status.fps} fps · source: ${status.source}`
+            ? `${status.demo_mode ? '[DEMO] ' : ''}RUNNING · frame ${status.frame_index} · ${status.fps} fps · ${String(status.source).slice(0, 46)}…`
             : 'Pipeline stopped'}
         </p>
       )}
