@@ -1,0 +1,53 @@
+# ── Python artefacts ────────────────────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Frontend (not needed in API image) ─────────────────────────────────────────
+dashboard/
+
+# ── Data (mounted as volumes at runtime) ───────────────────────────────────────
+data/raw/
+data/processed/
+data/sample_videos/
+
+# ── Model weights (mounted as volume at runtime) ────────────────────────────────
+models/weights/
+
+# ── Notebooks (Colab-only) ──────────────────────────────────────────────────────
+notebooks/
+
+# ── Docs / scripts ──────────────────────────────────────────────────────────────
+docs/
+scripts/
+
+# ── Git ─────────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── IDE ─────────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Env ─────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Misc ────────────────────────────────────────────────────────────────────────
+*.log
+*.db
+*.sqlite
+*.sqlite3
+Thumbs.db
+.DS_Store

@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  # ── Backend (FastAPI) ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    image: trafficvision-api
+    container_name: trafficvision-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models/weights:/app/models/weights:ro   # ONNX weights (read-only)
+      - ./data/sample_videos:/app/data/sample_videos:ro
+      - db_data:/app/data/db
+    environment:
+      - MODEL_PATH=${MODEL_PATH:-models/weights/yolov8s_traffic.onnx}
+      - VIDEO_SOURCE=${VIDEO_SOURCE:-data/sample_videos/traffic.mp4}
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.4}
+      - IOU_THRESHOLD=${IOU_THRESHOLD:-0.5}
+      - TARGET_CLASSES=${TARGET_CLASSES:-2,3,5,7}
+      - TARGET_FPS=${TARGET_FPS:-25}
+      - FRAME_SKIP=${FRAME_SKIP:-1}
+      - METERS_PER_PIXEL=${METERS_PER_PIXEL:-0.05}
+      - ANOMALY_WINDOW_SECONDS=${ANOMALY_WINDOW_SECONDS:-60}
+      - ANOMALY_STD_THRESHOLD=${ANOMALY_STD_THRESHOLD:-2.0}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:80,http://localhost,http://dashboard
+      - DATABASE_URL=sqlite+aiosqlite:///./data/db/trafficvision.db
+      - RING_BUFFER_SECONDS=${RING_BUFFER_SECONDS:-300}
+      - JPEG_QUALITY=${JPEG_QUALITY:-80}
+      - METRICS_INTERVAL_MS=${METRICS_INTERVAL_MS:-500}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on: []
+    networks:
+      - trafficvision
+
+  # ── Frontend (React + Nginx) ─────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: dashboard
+      dockerfile: Dockerfile
+    image: trafficvision-dashboard
+    container_name: trafficvision-dashboard
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    networks:
+      - trafficvision
+
+volumes:
+  db_data:
+
+networks:
+  trafficvision:
+    driver: bridge
