@@ -68,20 +68,21 @@ def _status_lines(content) -> list:
 @router.get("/pipeline/lines", response_model=LinesResponse)
 async def get_lines() -> LinesResponse:
     """Current counting line geometry (interactive editor hydration)."""
-    cfg = manager._config   # noqa: SLF001 — single-owner manager, read-only
-    counting = _status_lines(cfg.counting_lines) if cfg else []
+    if manager._pipeline is not None:
+        active_lines = manager._pipeline.line_specs
+    elif manager._config and manager._config.counting_lines:
+        active_lines = manager._config.counting_lines
+    else:
+        active_lines = getattr(manager, "_default_lines", [])
+
+    counting = _status_lines(active_lines)
     return LinesResponse(counting_lines=counting)
 
 
 @router.post("/pipeline/lines", response_model=LinesResponse)
 async def update_lines(req: LinesUpdateRequest) -> LinesResponse:
-    """Update counting lines live — pipeline keeps running."""
+    """Update counting lines live — persists whether pipeline is running or idle."""
     counting = [c.as_spec() for c in req.counting_lines]
-
-    if not manager.running:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=409, detail="Pipeline not running")
-
     manager.set_lines(counting_lines=counting)
     return LinesResponse(counting_lines=_status_lines(counting))
 

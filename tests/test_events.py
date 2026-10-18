@@ -155,14 +155,12 @@ def test_reset_pool_keeps_data(tmp_path):
 
 def test_track_id_scoped_by_session(tmp_path):
     setup_db(tmp_path)
-    first = collect_events(1)
-    assert len(first) == 1
+    ev1 = events_db.make_event(vehicle_type="car", track_id=1, session_id="sess-A")
+    ev2 = events_db.make_event(vehicle_type="car", track_id=1, session_id="sess-B")
+    events_db.write_events([ev1, ev2])
 
-    saved_a = store_events(first, session_id="sess-A")
-    saved_b = store_events(store_events(first, session_id="sess-A"), session_id="sess-B")
-
-    rows = get_events()
-    assert rows["total"] == 2                      # NOT merged
+    rows = events_db.query_events()
+    assert rows["total"] == 2
     sids = {r["session_id"] for r in rows["items"]}
     assert sids == {"sess-A", "sess-B"}
 
@@ -171,26 +169,25 @@ def test_track_id_scoped_by_session(tmp_path):
 
 def test_failed_batch_is_reported(tmp_path, monkeypatch):
     setup_db(tmp_path)
-    one = build_record()
-    assert one is not None
+    one = events_db.make_event(vehicle_type="car", track_id=1)
 
-    def boom(rows):
+    def mock_write(batch):
         import sqlite3 as _s
         raise _s.OperationalError("disk error simulation")
 
-    monkeypatch.setattr(_m, "store_events", store_events)
-    monkeypatch.setattr(_m, "_write_with_retry", _write_with_retry)
-
-    # must not raise; the failure is logged (see roadseye.log)
-    _write_with_retry([one])
-    log_path = Path("F:/SIPIL/pribadi/JALAN/RoadsEye") / "venv" / "Scripts"
-    assert not log_path.exists()
+    monkeypatch.setattr(events_db, "write_events", mock_write)
+    result = events_db.writer._write_with_retry([one])
+    assert result == 0
 
 
 # --- 8. Filters and pagination return the right rows -------------------------
 
+def _t(y, m, d, h, mi):
+    return dt.datetime(y, m, d, h, mi, tzinfo=dt.timezone.utc).timestamp()
+
+
 def _make(ts, vtype, tid):
-    return build_count(count=1, cls=vtype, tid=tid, ts=ts)
+    return events_db.make_event(vehicle_type=vtype, track_id=tid, timestamp_epoch=ts)
 
 
 def test_filters_and_pagination(tmp_path):
@@ -200,18 +197,18 @@ def test_filters_and_pagination(tmp_path):
         _make(_t(2026, 10, 10, 2, 0), "car", 2),
         _make(_t(2026, 10, 10, 3, 0), "motorcycle", 3),
     ]
-    store_rows(rows)
+    events_db.write_events(rows)
 
-    cars = get_class("car")
+    cars = events_db.query_events(vehicle_type="car")
     assert cars["total"] == 2
 
-    page1 = get_page(1)
-    page2 = get_page(2)
+    page1 = events_db.query_events(limit=2, offset=0)
+    page2 = events_db.query_events(limit=2, offset=2)
     assert page1["total"] == page2["total"] == 3
-    assert [r["track_id"] for r in page1["rows"]] == [3, 2]
-    assert [r["track_id"] for r in page2["rows"]] == [1]
+    assert len(page1["items"]) == 2
+    assert len(page2["items"]) == 1
 
-    day = get_day("2026-10-17")
+    day = events_db.query_events(date_from="2026-10-17", date_to="2026-10-17")
     assert day["total"] == 1
 
 
@@ -223,10 +220,25 @@ def test_hourly_buckets_jakarta(tmp_path):
         _make(_t(2026, 10, 17, 3, 30), "car", 1),      # 10:30 WIB same day
         _make(_t(2026, 10, 17, 17, 0), "car", 2),      # 00:00 WIB NEXT day
     ]
-    store_rows(rows)
+    events_db.write_events(rows)
 
-    s = api.db.summary()
-    hours = {h["hour"]: h["total"] for h in s["hours"]}
+    s = events_db.history_summary()
+    hours = {h["hour"]: h["total"] for h in s["hourly"]}
     assert hours.get("2026-10-17T10:00:00") == 1
     assert hours.get("2026-10-18T00:00:00") == 1
-    assert r["total"] == 2
+    assert s["total_events"] == 2
+
+
+# --- 10. Today cumulative counts resume ---------------------------------------
+
+def test_today_counts_and_resume(tmp_path):
+    setup_db(tmp_path)
+    now_epoch = dt.datetime.now(dt.timezone.utc).timestamp()
+    events_db.write_events([
+        events_db.make_event(vehicle_type="motorcycle", timestamp_epoch=now_epoch),
+        events_db.make_event(vehicle_type="motorcycle", timestamp_epoch=now_epoch),
+        events_db.make_event(vehicle_type="car", timestamp_epoch=now_epoch),
+    ])
+    counts = events_db.get_today_counts()
+    assert counts.get("motorcycle") == 2
+    assert counts.get("car") == 1

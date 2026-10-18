@@ -42,6 +42,7 @@ class VideoSource:
         self._cap: cv2.VideoCapture | None = None
         self._frame_idx: int = 0
         self._t0: float = 0.0
+        self._backlog_dropped: int = 0   # live-buffered frames skipped to stay on the live edge
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -75,6 +76,14 @@ class VideoSource:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev_opts
         if not self._cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {self.source!r}")
+        if self._is_live_source(self.source):
+            # Cap the ship-in buffer where the backend honours it (webcam-like
+            # sources); FFmpeg/HLS may ignore it, the backlog drain in read()
+            # then covers it.
+            try:
+                self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+            except Exception:
+                pass
         self._frame_idx = 0
         self._t0 = time.monotonic()
 
@@ -129,11 +138,32 @@ class VideoSource:
     # ── Reading ───────────────────────────────────────────────────────────────
 
     def read(self) -> tuple[np.ndarray | None, FrameMeta]:
-        """Read a single frame. Returns (None, meta) on end-of-stream."""
+        """Read a single frame. Returns (None, meta) on end-of-stream.
+
+        For live sources every read also drains buffered frames that arrived
+        while the previous frame was being processed, keeping the processed
+        frame at the live edge (video no longer falls behind and then skips)."""
         if self._cap is None:
             raise RuntimeError("VideoSource not opened. Call open() first.")
 
         ret, frame = self._cap.read()
+
+        if self.is_live and ret:
+            # grab() is cheap (< a few ms) while the frame comes from the local
+            # buffer — discard those; the frame that costs real network time is
+            # the freshest one, so retrieve it as ours.
+            while True:
+                t0 = time.perf_counter()
+                ok = self._cap.grab()
+                if not ok:
+                    break
+                if time.perf_counter() - t0 < 0.004:
+                    self._backlog_dropped += 1
+                    continue
+                ok2, fresher = self._cap.retrieve()
+                if ok2 and fresher is not None:
+                    frame = fresher
+                break
 
         if not ret:
             if self.loop and not self.is_live:

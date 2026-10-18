@@ -9,6 +9,7 @@ Responsibilities:
 """
 from __future__ import annotations
 
+import datetime as _dt
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -76,7 +77,7 @@ class CountingLine:
     or oscillating within ±HYSTERESIS_PX of the line cannot re-trigger.
     """
 
-    HYSTERESIS_PX = 15.0   # dead-band around the line (anti-oscillation)
+    HYSTERESIS_PX = 10.0   # dead-band around the line (anti-oscillation)
 
     def __init__(self, p1: tuple[int, int], p2: tuple[int, int]) -> None:
         self.p1 = np.array(p1, dtype=float)
@@ -86,6 +87,11 @@ class CountingLine:
         self.count_per_class: dict[str, int] = defaultdict(int)
         # (track, prev_side, side) for each crossing in the LAST update() call
         self.last_crossings: list[tuple[Track, float, float]] = []
+
+    def set_baseline_counts(self, baseline: dict[str, int]) -> None:
+        """Initialize line count from existing daily baseline."""
+        self.count_per_class = defaultdict(int, baseline)
+        self.total_count = sum(self.count_per_class.values())
 
     def update(self, tracks: list[Track]) -> list[Track]:
         """Check each track for a crossing. Returns newly-crossed tracks."""
@@ -339,8 +345,33 @@ class AnalyticsEngine:
         self._recent_alerts: deque[Alert] = deque(maxlen=20)
         self._frame_index: int = 0
 
+        # Asia/Jakarta calendar day tracking (WIB = UTC+7)
+        wib_now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=7)))
+        self._current_date_wib: str = wib_now.strftime("%Y-%m-%d")
+        self._today_baseline: dict[str, int] = {}
+
+    def set_today_baseline(self, baseline_counts: dict[str, int]) -> None:
+        """Initialize or resume counts from today's database records.
+
+        Allows counting to continue seamlessly across reconnects on the same day.
+        """
+        self._today_baseline = dict(baseline_counts or {})
+        for _, line in self._lines:
+            line.set_baseline_counts(self._today_baseline)
+
     def update(self, tracks: list[Track]) -> FrameMetrics:
         """Process one frame's tracks and return an analytics snapshot."""
+
+        # ── Check midnight rollover (Asia/Jakarta = UTC+7) ────────────────────
+        wib_now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=7)))
+        today_str = wib_now.strftime("%Y-%m-%d")
+        if today_str != self._current_date_wib:
+            # Pindah hari: reset counter harian ke 0
+            self._current_date_wib = today_str
+            self._today_baseline = {}
+            for _, line in self._lines:
+                line.total_count = 0
+                line.count_per_class.clear()
 
         # ── Multi-line counting ───────────────────────────────────────────────
         count_per_line: dict[str, int] = {}
@@ -439,22 +470,27 @@ class AnalyticsEngine:
         return out
 
     def set_line_specs(self, specs: list[CountingLineSpec]) -> None:
-        """Replace counting lines live (interactive editor).
+        """Replace counting lines live without resetting vehicle counters.
 
-        Lines whose geometry is unchanged keep their counters; moved lines are
-        rebuilt with a zeroed counter (a moved line invalidates prior crossings).
+        Preserves total_count, count_per_class, and track states from matching
+        prior lines (matched by name or by index) so user line edits never reset counts.
         """
-        old: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
-            name: (tuple(map(float, line.p1)), tuple(map(float, line.p2)))
-            for name, line in self._lines
-        }
-        self._lines = []
-        for spec in (specs or []):
-            self._lines.append((spec.name, CountingLine(spec.p1, spec.p2)))
-        new: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
-            name: ((float(l.p1[0]), float(l.p1[1])), (float(l.p2[0]), float(l.p2[1])))
-            for name, l in self._lines
-        }
-        for name in set(old) & set(new):
-            if old[name] != new[name]:
-                self._lines[[n for n, _ in self._lines].index(name)][1].total_count = 0
+        old_lines_map = {name: line for name, line in self._lines}
+        old_lines_list = [line for _, line in self._lines]
+
+        new_lines: list[tuple[str, CountingLine]] = []
+        for idx, spec in enumerate(specs or []):
+            new_line = CountingLine(spec.p1, spec.p2)
+            # Find matching prior line by name, or fallback by index
+            matched = old_lines_map.get(spec.name)
+            if matched is None and idx < len(old_lines_list):
+                matched = old_lines_list[idx]
+
+            if matched is not None:
+                new_line.total_count = matched.total_count
+                new_line.count_per_class = defaultdict(int, matched.count_per_class)
+                new_line._prev_sides = dict(matched._prev_sides)
+
+            new_lines.append((spec.name, new_line))
+
+        self._lines = new_lines

@@ -151,16 +151,16 @@ class RecentMetricsResponse(BaseModel):
 class VehicleEventRecord(BaseModel):
     """One persisted confirmed counting event (vehicle_events row)."""
     event_id: str
-    camera_id: str
-    session_id: str
-    track_id: int
+    camera_id: str | None = None
+    session_id: str | None = None
+    track_id: int | None = None
     vehicle_type: str
     timestamp_utc: str
     timestamp_epoch: float
     direction: str | None = None
     confidence: float | None = None
-    counting_line_id: str
-    created_at_utc: str
+    counting_line_id: str | None = None
+    created_at_utc: str | None = None
 
 
 class EventsPage(BaseModel):
@@ -178,12 +178,24 @@ class HourlyBucket(BaseModel):
     count_per_class: dict[str, int]
 
 
+class DailyBucket(BaseModel):
+    """Per-day totals in Asia/Jakarta local time: day total, first/last data
+    time (HH.MM WIB) and that day's peak hour (HH.00-HH.00) with its volume."""
+    date: str
+    total: int
+    first_time: str | None = None
+    last_time: str | None = None
+    peak_hour: str | None = None
+    peak_count: int = 0
+
+
 class HistorySummaryResponse(BaseModel):
     """Cumulative historical totals from persisted events (never reset)."""
     total_events: int
     count_per_class: dict[str, int]
     count_per_line: dict[str, int]
     hourly: list[HourlyBucket]
+    daily: list[DailyBucket] = Field(default_factory=list)
     peak_hour: str | None
     peak_count: int
     first_event_utc: str | None

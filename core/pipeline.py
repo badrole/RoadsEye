@@ -85,6 +85,7 @@ class Pipeline:
         self._tracker:   Tracker | None     = None
         self._analytics: AnalyticsEngine | None = None
         self._demo_gen                      = None   # core.demo_generator.DemoGenerator
+        self._initial_counts: dict[str, int] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -113,6 +114,8 @@ class Pipeline:
             pixels_per_meter=cfg.pixels_per_meter,
             fps=fps,
         )
+        if self._initial_counts:
+            self._analytics.set_today_baseline(self._initial_counts)
 
         if cfg.demo_mode:
             print("[Pipeline] Source  : DEMO (synthetic)")
@@ -129,6 +132,15 @@ class Pipeline:
 
     def stop(self) -> None:
         self._running = False
+
+    @property
+    def analytics(self) -> AnalyticsEngine | None:
+        return self._analytics
+
+    def set_today_baseline(self, baseline: dict[str, int]) -> None:
+        self._initial_counts = dict(baseline or {})
+        if self._analytics:
+            self._analytics.set_today_baseline(self._initial_counts)
 
     # ── Sync runner ───────────────────────────────────────────────────────────
 
@@ -221,6 +233,13 @@ class Pipeline:
         return self._encode_jpeg(annotated), metrics
 
     # ── Live line editing ─────────────────────────────────────────────────────
+
+    @property
+    def line_specs(self) -> list[CountingLineSpec]:
+        """Return current counting line specs."""
+        if self._analytics is not None:
+            return self._analytics.line_specs
+        return list(self.config.counting_lines)
 
     def set_lines(self, counting_lines: list[CountingLineSpec] | None = None) -> None:
         """Update counting lines on a running pipeline (interactive editor)."""

@@ -1,21 +1,24 @@
 /**
  * LineEditor — interactive counting line editor over the live CCTV canvas.
- *   counting (cyan) — crossing counts a vehicle
  *
- * Drag endpoints / drag body, click to select, add/delete. Committed via
- * POST /api/pipeline/lines (backend redraws lines in annotated frames).
+ * Drag endpoints (p1 / p2) to change angles and length, or drag the line body
+ * to move the whole line.
+ * Committed via POST /api/pipeline/lines (counts are preserved and never reset).
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 
-const API  = '/api'
+const API = '/api'
 const CYAN = '#22d3ee'
+const YELLOW = '#FFD100'
 
 export default function LineEditor({ canvasRef }) {
-  const overlayRef              = useRef(null)
-  const [editing, setEditing]   = useState(false)
-  const [lines, setLines]       = useState({ counting: [], lock: [] })
-  const [selected, setSelected] = useState(null)   // {kind, idx}
-  const dragRef  = useRef(null)
+  const overlayRef = useRef(null)
+  const [editing, setEditing] = useState(false)
+  const [lines, setLines] = useState({ counting: [] })
+  const [selectedIdx, setSelectedIdx] = useState(null)
+  const [savedNotice, setSavedNotice] = useState(false)
+
+  const dragRef = useRef(null)
   const frameRef = useRef({ w: 1280, h: 720 })
 
   // ── Hydration ──────────────────────────────────────────────────────────────
@@ -24,87 +27,123 @@ export default function LineEditor({ canvasRef }) {
       const res = await fetch(`${API}/pipeline/lines`)
       if (!res.ok) return
       const d = await res.json()
-      setLines({ counting: d.counting_lines ?? [], lock: [] })
-    } catch { /* backend down */ }
+      const arr = d.counting_lines ?? []
+      if (arr.length > 0) {
+        setLines({ counting: arr })
+      } else {
+        setLines({ counting: [{ name: 'line1', x1: 0, y1: 380, x2: 1280, y2: 380 }] })
+      }
+    } catch {
+      setLines(prev => (prev.counting.length > 0 ? prev : { counting: [{ name: 'line1', x1: 0, y1: 380, x2: 1280, y2: 380 }] }))
+    }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+  }, [load])
 
-  const commit = useCallback(async (next) => {
-    setLines(next)
-    const map  = l => ({ name: l.name, x1: l.x1 | 0, y1: l.y1 | 0, x2: l.x2 | 0, y2: l.y2 | 0 })
-    const body = { counting_lines: next.counting.map(map) }
+  const commit = useCallback(async (nextLines) => {
+    setLines(nextLines)
+    const map = (l) => ({
+      name: l.name || 'line1',
+      x1: Math.round(l.x1),
+      y1: Math.round(l.y1),
+      x2: Math.round(l.x2),
+      y2: Math.round(l.y2),
+    })
+    const body = { counting_lines: nextLines.counting.map(map) }
     try {
-      await fetch(`${API}/pipeline/lines`, {
+      const res = await fetch(`${API}/pipeline/lines`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-    } catch { /* next change retries */ }
+      if (res.ok) {
+        setSavedNotice(true)
+        setTimeout(() => setSavedNotice(false), 2000)
+      }
+    } catch {
+      /* retry on next action */
+    }
   }, [])
 
   // ── Mutations ───────────────────────────────────────────────────────────────
   const addLine = useCallback(() => {
     const fr = frameRef.current
-    const y  = Math.round(fr.h * 0.55)
-    const n  = lines.counting.length + 1
-    const nl  = { name: `line${n}`, x1: 0, y1: y, x2: fr.w, y2: y }
-    const next = { counting: [...lines.counting, nl], lock: [] }
-    setSelected({ kind: 'counting', idx: next.counting.length - 1 })
+    const n = lines.counting.length + 1
+    const y = Math.round(fr.h * (0.35 + ((n % 4) * 0.12)))
+    const nl = { name: `line${n}`, x1: 50, y1: y, x2: fr.w - 50, y2: y }
+    const next = { counting: [...lines.counting, nl] }
+    setSelectedIdx(next.counting.length - 1)
     commit(next)
   }, [lines, commit])
 
   const deleteSelected = useCallback(() => {
-    if (!selected || selected.kind !== 'counting') return
-    const arr = lines.counting.filter((_, i) => i !== selected.idx)
-    setSelected(null)
-    commit({ counting: arr, lock: [] })
-  }, [selected, lines, commit])
+    if (selectedIdx === null || lines.counting.length <= 1) return
+    const arr = lines.counting.filter((_, i) => i !== selectedIdx)
+    setSelectedIdx(null)
+    commit({ counting: arr })
+  }, [selectedIdx, lines, commit])
 
-  // ── Pointer interactions (frame coords via rect scaling) ───────────────────
+  // ── Coordinate conversion ──────────────────────────────────────────────────
   const toFrame = useCallback((e) => {
     const ov = overlayRef.current
     if (!ov) return { fx: 0, fy: 0, rect: null }
     const rect = ov.getBoundingClientRect()
     const fr = frameRef.current
-    return {
-      fx: (e.clientX - rect.left) * fr.w / rect.width,
-      fy: (e.clientY - rect.top)  * fr.h / rect.height,
-      rect,
-    }
+    const fx = Math.max(0, Math.min(fr.w, ((e.clientX - rect.left) * fr.w) / (rect.width || 1)))
+    const fy = Math.max(0, Math.min(fr.h, ((e.clientY - rect.top) * fr.h) / (rect.height || 1)))
+    return { fx, fy, rect }
   }, [])
 
+  // ── Hit test (endpoints have priority and generous touch radius) ───────────
   const hitTest = useCallback((fx, fy, rect) => {
-    const scale = rect.width / frameRef.current.w   // css px per frame px
+    const scale = rect.width / (frameRef.current.w || 1)
     const arr = lines.counting
+
     for (let i = arr.length - 1; i >= 0; i--) {
       const l = arr[i]
-      if (Math.hypot(fx - l.x1, fy - l.y1) * scale <= 12) return { kind: 'counting', idx: i, part: 'p1' }
-      if (Math.hypot(fx - l.x2, fy - l.y2) * scale <= 12) return { kind: 'counting', idx: i, part: 'p2' }
+      // Endpoint 1 (p1) — 24 CSS pixels radius
+      if (Math.hypot(fx - l.x1, fy - l.y1) * scale <= 24) {
+        return { idx: i, part: 'p1' }
+      }
+      // Endpoint 2 (p2) — 24 CSS pixels radius
+      if (Math.hypot(fx - l.x2, fy - l.y2) * scale <= 24) {
+        return { idx: i, part: 'p2' }
+      }
+      // Line body — 16 CSS pixels radius
       const ax = l.x1, ay = l.y1, bx = l.x2, by = l.y2
-      const t = Math.max(0, Math.min(1, ((fx - ax) * (bx - ax) + (fy - ay) * (by - ay)) /
-               ((bx - ax) ** 2 + (by - ay) ** 2 || 1)))
-      const dist = Math.hypot(fx - (ax + t * (bx - ax)), fy - (ay + t * (by - ay))) * scale
-      if (dist <= 8) return { kind: 'counting', idx: i, part: 'body' }
+      const segLenSq = (bx - ax) ** 2 + (by - ay) ** 2 || 1
+      const t = Math.max(0, Math.min(1, ((fx - ax) * (bx - ax) + (fy - ay) * (by - ay)) / segLenSq))
+      const projX = ax + t * (bx - ax)
+      const projY = ay + t * (by - ay)
+      const dist = Math.hypot(fx - projX, fy - projY) * scale
+      if (dist <= 16) {
+        return { idx: i, part: 'body' }
+      }
     }
     return null
   }, [lines])
 
+  // ── Pointer events ─────────────────────────────────────────────────────────
   const onPointerDown = useCallback((e) => {
     if (!editing) return
     const { fx, fy, rect } = toFrame(e)
     const hit = hitTest(fx, fy, rect)
     overlayRef.current?.setPointerCapture?.(e.pointerId)
+
     if (hit) {
-      setSelected({ kind: hit.kind, idx: hit.idx })
-      const l = lines[hit.kind][hit.idx]
+      setSelectedIdx(hit.idx)
+      const l = lines.counting[hit.idx]
       dragRef.current = {
         hit,
-        grabX: fx, grabY: fy,
+        grabX: fx,
+        grabY: fy,
         orig: { x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2 },
+        latestLines: lines,
       }
     } else {
-      setSelected(null)
+      setSelectedIdx(null)
       dragRef.current = null
     }
   }, [editing, toFrame, hitTest, lines])
@@ -113,104 +152,181 @@ export default function LineEditor({ canvasRef }) {
     const drag = dragRef.current
     if (!drag) return
     const { fx, fy } = toFrame(e)
-    const dx = fx - drag.grabX, dy = fy - drag.grabY
+    const dx = fx - drag.grabX
+    const dy = fy - drag.grabY
     const fr = frameRef.current
-    const o  = drag.orig
+    const o = drag.orig
+
     let x1 = o.x1, y1 = o.y1, x2 = o.x2, y2 = o.y2
-    if (drag.hit.part === 'body') {
-      x1 = Math.max(0, Math.min(fr.w, o.x1 + dx)); y1 = Math.max(0, Math.min(fr.h, o.y1 + dy))
-      x2 = Math.max(0, Math.min(fr.w, o.x2 + dx)); y2 = Math.max(0, Math.min(fr.h, o.y2 + dy))
-    } else if (drag.hit.part === 'p1') {
-      x1 = Math.max(0, Math.min(fr.w, fx)); y1 = Math.max(0, Math.min(fr.h, fy))
-    } else {
-      x2 = Math.max(0, Math.min(fr.w, fx)); y2 = Math.max(0, Math.min(fr.h, fy))
+    if (drag.hit.part === 'p1') {
+      // Freeform drag endpoint 1
+      x1 = Math.max(0, Math.min(fr.w, fx))
+      y1 = Math.max(0, Math.min(fr.h, fy))
+    } else if (drag.hit.part === 'p2') {
+      // Freeform drag endpoint 2
+      x2 = Math.max(0, Math.min(fr.w, fx))
+      y2 = Math.max(0, Math.min(fr.h, fy))
+    } else if (drag.hit.part === 'body') {
+      // Move entire line body
+      x1 = Math.max(0, Math.min(fr.w, o.x1 + dx))
+      y1 = Math.max(0, Math.min(fr.h, o.y1 + dy))
+      x2 = Math.max(0, Math.min(fr.w, o.x2 + dx))
+      y2 = Math.max(0, Math.min(fr.h, o.y2 + dy))
     }
-    // local preview only — no commit during drag (optimistic line state)
-    const arr = lines.counting.map((it, i) => i === drag.hit.idx ? { ...it, x1, y1, x2, y2 } : it)
-    setLines(prev => ({ counting: arr, lock: [] }))
+
+    const arr = lines.counting.map((it, i) => (i === drag.hit.idx ? { ...it, x1, y1, x2, y2 } : it))
+    const nextState = { counting: arr }
+    drag.latestLines = nextState
     drag.moved = true
+    setLines(nextState)
   }, [toFrame, lines])
 
   const onPointerUp = useCallback((e) => {
     e.currentTarget?.releasePointerCapture?.(e.pointerId)
     const drag = dragRef.current
     dragRef.current = null
-    if (!drag || !drag.moved) return
-    commit(lines)
-  }, [commit, lines])
+    if (drag && drag.moved && drag.latestLines) {
+      commit(drag.latestLines)
+    }
+  }, [commit])
 
-  // ── Keep overlay geometry in sync with the video canvas ────────────────────
+  // ── Sync frame dimensions with canvas ──────────────────────────────────────
   useEffect(() => {
     const id = setInterval(() => {
       const c = canvasRef?.current
-      if (c && c.width > 0 && c.width !== frameRef.current.w) {
+      if (c && c.width > 0 && (c.width !== frameRef.current.w || c.height !== frameRef.current.h)) {
         frameRef.current = { w: c.width, h: c.height }
       }
     }, 1000)
     return () => clearInterval(id)
   }, [canvasRef])
 
-  // ── Overlay drawing ────────────────────────────────────────────────────────
+  // ── Overlay rendering ──────────────────────────────────────────────────────
   useEffect(() => {
     const cv = overlayRef.current
     if (!cv) return
     const fr = frameRef.current
-    cv.width = fr.w; cv.height = fr.h
+    cv.width = fr.w
+    cv.height = fr.h
     const ctx = cv.getContext('2d')
     ctx.clearRect(0, 0, fr.w, fr.h)
     if (!editing) return
 
-    for (const [k, arr] of [['counting', lines.counting]]) {
-      const color = CYAN
-      arr.forEach((l, i) => {
-        const isSel = selected?.kind === 'counting' && selected?.idx === i
+    lines.counting.forEach((l, i) => {
+      const isSel = selectedIdx === i
+      const color = isSel ? YELLOW : CYAN
+
+      // Outer glow for selected line
+      if (isSel) {
+        ctx.strokeStyle = 'rgba(255, 209, 0, 0.3)'
+        ctx.lineWidth = 10
+        ctx.beginPath()
+        ctx.moveTo(l.x1, l.y1)
+        ctx.lineTo(l.x2, l.y2)
+        ctx.stroke()
+      }
+
+      // Line stroke
+      ctx.strokeStyle = color
+      ctx.lineWidth = isSel ? 4 : 3
+      ctx.beginPath()
+      ctx.moveTo(l.x1, l.y1)
+      ctx.lineTo(l.x2, l.y2)
+      ctx.stroke()
+
+      // Endpoint handles (drag points)
+      for (const [ex, ey] of [[l.x1, l.y1], [l.x2, l.y2]]) {
+        // Outer dark circle
+        ctx.fillStyle = '#0f172a'
+        ctx.beginPath()
+        ctx.arc(ex, ey, isSel ? 11 : 8, 0, Math.PI * 2)
+        ctx.fill()
         ctx.strokeStyle = color
-        ctx.lineWidth = isSel ? 6 : 3
-        ctx.beginPath(); ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2); ctx.stroke()
-        // endpoints
+        ctx.lineWidth = isSel ? 3 : 2
+        ctx.stroke()
+
+        // Inner solid dot
         ctx.fillStyle = color
-        for (const [ex, ey] of [[l.x1, l.y1], [l.x2, l.y2]]) {
-          ctx.beginPath(); ctx.arc(ex, ey, isSel ? 9 : 6, 0, Math.PI * 2); ctx.fill()
-        }
-        // label
-        ctx.font = '20px monospace'
-        ctx.fillStyle = color
-        ctx.fillText(l.name, l.x1 + 6, l.y1 - 10)
-      })
-    }
-  }, [editing, lines, selected])
+        ctx.beginPath()
+        ctx.arc(ex, ey, isSel ? 5 : 4, 0, Math.PI * 2)
+        ctx.fill()
+      }
+
+      // Line name label badge
+      const midX = (l.x1 + l.x2) / 2
+      const midY = (l.y1 + l.y2) / 2
+      const label = `${l.name} (drag endpoint)`
+
+      ctx.font = 'bold 15px monospace'
+      const textWidth = ctx.measureText(label).width
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+      ctx.fillRect(midX - textWidth / 2 - 6, midY - 22, textWidth + 12, 20)
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1
+      ctx.strokeRect(midX - textWidth / 2 - 6, midY - 22, textWidth + 12, 20)
+
+      ctx.fillStyle = color
+      ctx.fillText(label, midX - textWidth / 2, midY - 7)
+    })
+  }, [editing, lines, selectedIdx])
 
   return (
     <>
-      {/* Toolbar — atas kanan video */}
-      <div className="absolute top-3 right-3 z-20 flex flex-wrap items-center gap-1.5 p-1.5 rounded-sm bg-asphalt/85 border border-lane-dim/50 backdrop-blur">
-        <button
-          onClick={() => setEditing(v => !v)}
-          className={`px-2 py-1.5 font-code text-[10px] tracking-widest uppercase rounded-sm transition-colors ${
-            editing ? 'bg-lane text-asphalt font-bold' : 'text-chalk hover:text-lane border border-lane-dim/40'
-          }`}
-        >
-          {editing ? 'Done' : 'Edit Garis'}
-        </button>
-        {editing && (
-          <>
-            <button onClick={addLine} className="px-2 py-1.5 font-code text-[10px] tracking-widest uppercase rounded-sm border border-lane-dim/40 text-chalk hover:text-lane transition-colors">Tambah</button>
-            <button onClick={deleteSelected} className="px-2 py-1.5 font-code text-[10px] tracking-widest uppercase rounded-sm border border-stop/50 text-stop hover:bg-stop hover:text-white transition-colors">Hapus</button>
-          </>
+      {/* Top Toolbar */}
+      <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
+        {savedNotice && (
+          <span className="px-2.5 py-1 rounded bg-go/20 border border-go text-go font-code text-[11px] font-bold shadow-md">
+            ✓ Saved (counts preserved)
+          </span>
         )}
+
+        <div className="flex items-center gap-1.5 p-1.5 rounded bg-asphalt-deep/90 border border-lane/40 backdrop-blur-md shadow-xl">
+          <button
+            onClick={() => setEditing((v) => !v)}
+            className={`px-3 py-1.5 font-code text-xs tracking-wider uppercase rounded transition-all cursor-pointer font-bold ${
+              editing
+                ? 'bg-lane text-asphalt shadow-glowlane'
+                : 'bg-asphalt-deep/80 text-chalk hover:text-lane border border-lane-dim/50'
+            }`}
+          >
+            {editing ? '✓ Done' : '✎ Edit Lines'}
+          </button>
+
+          {editing && (
+            <>
+              <button
+                onClick={addLine}
+                title="Add new counting line"
+                className="px-2.5 py-1.5 font-code text-xs rounded border border-lane/50 text-lane hover:bg-lane/20 transition-colors cursor-pointer"
+              >
+                + Add Line
+              </button>
+              {lines.counting.length > 1 && selectedIdx !== null && (
+                <button
+                  onClick={deleteSelected}
+                  title="Delete selected line"
+                  className="px-2.5 py-1.5 font-code text-xs rounded border border-stop/50 text-stop hover:bg-stop hover:text-white transition-colors cursor-pointer"
+                >
+                  ✕ Delete
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Overlay canvas — hanya aktif saat editing */}
+      {/* Overlay Canvas for Freeform Endpoint Dragging */}
       <canvas
         ref={overlayRef}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={() => { dragRef.current = null }}
+        onPointerLeave={() => {
+          dragRef.current = null
+        }}
         className={`absolute inset-0 w-full h-full ${editing ? 'cursor-crosshair' : 'pointer-events-none'}`}
         style={{ minHeight: 360 }}
       />
     </>
   )
 }
-

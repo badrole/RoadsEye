@@ -61,24 +61,53 @@ export function useVideoStream(canvasRef, enabled = true) {
     const ws = new WebSocket(`${BASE_WS}/ws/video`)
     ws.binaryType = 'blob'
 
+    // Render decoupled from the wire: keep only the newest frame and let a
+    // rAF loop draw it. Serially decoding every JPEG is what made the feed
+    // stutter and jump several frames ahead.
+    let latestBlob = null
+    let currentBmp = null
+    let rafId = 0
+    let stale = false
+
+    const drawLoop = () => {
+      if (stale) return
+      if (latestBlob) {
+        const blob = latestBlob
+        latestBlob = null
+        createImageBitmap(blob)
+          .then((bmp) => {
+            if (stale) { bmp.close(); return }
+            if (currentBmp) currentBmp.close()
+            currentBmp = bmp
+            const canvas = canvasRef.current
+            if (canvas) {
+              canvas.width = bmp.width
+              canvas.height = bmp.height
+              canvas.getContext('2d').drawImage(bmp, 0, 0)
+            }
+          })
+          .catch(() => {
+            /* undecodable frame — drop it */
+          })
+      }
+      rafId = requestAnimationFrame(drawLoop)
+    }
+
     ws.onopen = () => { setConnected(true); onOpen() }
-    ws.onclose = (e) => { setConnected(false); onClose(e.wasClean) }
+    ws.onclose = () => {
+      setConnected(false)
+      stale = true
+      cancelAnimationFrame(rafId)
+      if (currentBmp) { currentBmp.close(); currentBmp = null }
+      onClose()
+    }
     ws.onerror = () => { ws.close() }
 
     ws.onmessage = (e) => {
-      const canvas = canvasRef.current
-      if (!canvas || !(e.data instanceof Blob)) return
-      const url = URL.createObjectURL(e.data)
-      const img  = new Image()
-      img.onload = () => {
-        const ctx = canvas.getContext('2d')
-        canvas.width  = img.width
-        canvas.height = img.height
-        ctx.drawImage(img, 0, 0)
-        URL.revokeObjectURL(url)
-      }
-      img.src = url
+      if (canvasRef.current && e.data instanceof Blob) latestBlob = e.data
     }
+
+    rafId = requestAnimationFrame(drawLoop)
 
     return ws
   }, [canvasRef])

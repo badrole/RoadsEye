@@ -16,7 +16,7 @@ const DEMO_LINE = { name: 'main', x1: 640, y1: 252, x2: 640, y2: 612 }
 
 export default function PipelineControl({ status, onStatusChange, vertical = false }) {
   const [source,    setSource]    = useState('0')
-  const [conf,      setConf]      = useState('0.35')
+  const [conf,      setConf]      = useState('35')   // percent (0-100)
   const [showLines, setShowLines] = useState(false)
   const [lines,     setLines]     = useState([])
   const [loading,   setLoading]   = useState(false)
@@ -56,7 +56,7 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           source: src,
-          confidence_threshold: parseFloat(conf),
+          confidence_threshold: parseFloat(conf) / 100,
           counting_lines: linesCfg,
         }),
       })
@@ -104,7 +104,7 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
         onClick={() => setOpen(v => !v)}
         className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-lane-wash transition-colors"
       >
-        <span className="road-label">Setup Sumber</span>
+        <span className="road-label">Source Setup</span>
         <span className="flex items-center gap-2">
           {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-go" />}
           <span className="font-code text-xs text-lane">{open ? '▾' : '▸'}</span>
@@ -126,14 +126,14 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
           />
         </div>
 
-        {/* Confidence */}
+        {/* Confidence — percent, converted for the 0-1 wire value */}
         <div className="flex flex-col gap-1">
-          <label className="font-code text-[10px] uppercase tracking-[0.2em] text-pip">Confidence</label>
+          <label className="font-code text-[10px] uppercase tracking-[0.2em] text-pip">Confidence (%)</label>
           <input
             type="number"
-            step="0.05"
-            min="0.05"
-            max="0.95"
+            step="5"
+            min="5"
+            max="95"
             className="bg-asphalt-deep border border-lane-dim/50 rounded-sm px-3 py-2 text-sm font-code text-chalk w-full focus:outline-none focus:border-lane transition-colors"
             value={conf}
             onChange={e => setConf(e.target.value)}
@@ -188,7 +188,7 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
       {showLines && !isRunning && (
         <div className="mt-3 space-y-2">
           <div className="font-code text-[10px] text-pip uppercase tracking-widest mb-1">
-            Counting lines — hitung saat menyeberang garis
+            Counting lines — count on line crossing
           </div>
           {lines.map((line, i) => (
             <div key={i} className="flex gap-1.5">

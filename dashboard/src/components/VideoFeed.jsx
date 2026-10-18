@@ -13,6 +13,7 @@ export default function VideoFeed({ enabled }) {
   return (
     <div className="relative w-full bg-asphalt-deep rounded-sm overflow-hidden border-2 border-lane-dim/60 shadow-glowlane">
       <LineEditor canvasRef={canvasRef} />
+
       {/* Plate — camera housing label */}
       <div className="absolute top-3 left-3 z-10 flex items-center gap-2">
         <div

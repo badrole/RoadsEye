@@ -11,7 +11,14 @@ import datetime
 from fastapi import APIRouter, HTTPException, Query, status
 
 from api.database import fetch_hourly_range, fetch_summary, ring_recent
-from api.events_db import backup, history_summary, list_sessions, query_events
+from api.events_db import (
+    backup,
+    delete_events_for_date,
+    history_summary,
+    list_sessions,
+    query_events,
+    vehicles_per_minute,
+)
 from api.schemas import (
     AnalyticsSummaryResponse,
     BackupResponse,
@@ -148,4 +155,126 @@ async def backup_history(
         resolved = await asyncio.to_thread(backup, path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Backup failed: {exc}")
-    return BackupResponse(path=str(resolved))
+    return BackupResponse(path=resolved.name)
+
+
+@router.get("/events/per-minute")
+async def event_per_minute(
+    minutes: int = Query(default=30, ge=5, le=120),
+) -> list[dict]:
+    """Vehicles counted per minute (WIB) over the last N minutes, zero-filled."""
+    return await asyncio.to_thread(vehicles_per_minute, minutes)
+
+
+@router.delete("/events/by-date")
+async def delete_events_by_date(
+    date: str = Query(..., description="WIB calendar date to purge: YYYY-MM-DD"),
+) -> dict:
+    """Irreversibly delete every vehicle event of one WIB calendar day from the
+    database AND from the Google Sheet (Vehicle_Events rows + rebuilt MAIN).
+    Sheet purge runs best-effort: it may lag if Google APIs are unreachable."""
+    import re
+    import sqlite3 as _s3
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date must be a WIB calendar date (YYYY-MM-DD)",
+        )
+    try:
+        return await asyncio.to_thread(delete_events_for_date, date)
+    except (_s3.Error, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
+
+
+@router.get("/events/export.csv")
+async def export_events_csv(
+    camera_id: str | None = Query(default=None),
+    vehicle_type: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+    limit: int = Query(default=10000, ge=1, le=50000),
+):
+    """Export filtered events directly as a downloadable CSV file."""
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+
+    data = await asyncio.to_thread(
+        query_events,
+        camera_id=camera_id,
+        vehicle_type=vehicle_type,
+        session_id=session_id,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=0,
+    )
+    items = sorted(data.get("items", []), key=lambda i: i.get("timestamp_epoch", 0))
+
+    # Google Sheet ('Vehicle_Events' tab) format: Timestamp, Vehicle Class —
+    # oldest first, Excel-ready (UTF-8 BOM).
+    output = io.StringIO()
+    output.write("\ufeff")
+    writer = csv.writer(output)
+    writer.writerow(["Timestamp", "Vehicle Class"])
+
+    wib_tz = datetime.timezone(datetime.timedelta(hours=7))
+    for it in items:
+        utc_str = it.get("timestamp_utc", "")
+        ts_str = ""
+        if utc_str:
+            try:
+                dt = datetime.datetime.fromisoformat(utc_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                ts_str = dt.astimezone(wib_tz).strftime("%Y-%m-%d %H:%M:%S WIB")
+            except Exception:
+                ts_str = utc_str
+        writer.writerow([ts_str, str(it.get("vehicle_type", "")).capitalize()])
+
+    output.seek(0)
+    filename = f"roadseye_vehicle_events_{datetime.date.today().isoformat()}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# ── Google Sheets Cloud Sync ─────────────────────────────────────────────────
+
+@router.get("/sheets/status")
+async def sheets_status() -> dict[str, Any]:
+    """Check configuration and connectivity status with Google Sheets."""
+    import api.sheets_sync as sheets_sync
+    configured = sheets_sync.is_configured()
+    sheet_id = sheets_sync.get_spreadsheet_id()
+    return {
+        "configured": configured,
+        "spreadsheet_id": sheet_id if configured else None,
+        "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{sheet_id}" if sheet_id else None,
+        "sync_interval_minutes": 15,
+        "sync_on_disconnect": True,
+    }
+
+
+@router.post("/sheets/sync")
+async def sheets_sync_now() -> dict[str, Any]:
+    """Manually trigger immediate synchronization to Google Sheets."""
+    import api.sheets_sync as sheets_sync
+    if not sheets_sync.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Sheets integration is not configured in .env",
+        )
+    try:
+        result = await asyncio.to_thread(sheets_sync.sync_to_google_sheets)
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Google Sheets sync failed: {exc}",
+        )
+

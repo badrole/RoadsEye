@@ -79,3 +79,9 @@ tmp/
 # Model weights (downloaded separately)
 yolov8s.pt
 *.pt
+
+credentials.json
+*credentials*.json
+
+# Local databases
+data/

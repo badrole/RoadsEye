@@ -2,8 +2,8 @@
  * RoadsEye Dashboard — main layout.
  *
  * Structure (desktop): control rail on the left (brand, live indicators,
- * KPI board) + monitoring deck on the right (video hero, charts, overlay).
- * Same feature set as before — re-arranged into a rail layout.
+ * KPI board, open database window) + monitoring deck on the right (video hero, charts, overlay).
+ * Database viewer opens in a separate window to keep CCTV monitoring unobstructed.
  */
 import { useState, useEffect, useCallback } from 'react'
 import { useMetricsStream } from './hooks/useWebSocket'
@@ -11,12 +11,11 @@ import { useMetricsStream } from './hooks/useWebSocket'
 import VideoFeed        from './components/VideoFeed'
 import StatsCards       from './components/StatsCards'
 import VehicleCountChart from './components/VehicleCountChart'
-import SpeedDistribution from './components/SpeedDistribution'
 import ClassBreakdown   from './components/ClassBreakdown'
-import AlertsPanel      from './components/AlertsPanel'
-import TrafficFlowMap   from './components/TrafficFlowMap'
+import VehicleTimestampFeed from './components/VehicleTimestampFeed'
 import PipelineControl  from './components/PipelineControl'
 import HistoryPanel     from './components/HistoryPanel'
+import DatabaseViewer   from './components/DatabaseViewer'
 
 const API = '/api'
 
@@ -39,7 +38,7 @@ function usePipelineStatus() {
   return { status, refresh }
 }
 
-/* ── Left rail: brand + live indicators + pipeline control ───────────────── */
+/* ── Left rail: brand + live indicators + open separate DB window ─────────── */
 function ControlRail({ status, connected, onRefresh, latest }) {
   const running = status?.running ?? false
 
@@ -57,7 +56,7 @@ function ControlRail({ status, connected, onRefresh, latest }) {
             <div className="road-label mt-1">Traffic Analytics</div>
           </div>
         </div>
-        {/* status — satu baris kecil */}
+        {/* status — single compact row */}
         <div className="mt-3 flex items-center gap-3 font-code text-[11px]">
           <span className="flex items-center gap-1.5">
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-go' : 'bg-stop'}`} />
@@ -74,14 +73,14 @@ function ControlRail({ status, connected, onRefresh, latest }) {
           <PipelineControl status={status} onStatusChange={onRefresh} vertical />
         </div>
         <div className="px-3 pt-4">
-          <div className="road-label mb-2 px-1">Komposisi Kelas</div>
+          <div className="road-label mb-2 px-1">Class Breakdown</div>
           <ClassBreakdown latest={latest} />
         </div>
       </div>
 
       <div className="px-5 py-4 border-t border-lane-dim/30">
         <p className="font-code text-[10px] text-pip tracking-widest uppercase">
-          Kab. Tangerang - Dishub
+          Tangerang Regency - Transport Dept
         </p>
       </div>
     </aside>
@@ -90,6 +89,10 @@ function ControlRail({ status, connected, onRefresh, latest }) {
 
 /* ── Mobile brand strip (rail hidden below lg) ────────────────────────────── */
 function MobileHeader({ status, connected }) {
+  const openDatabaseWindow = () => {
+    window.open('?view=database', '_blank', 'width=1280,height=820,menubar=no,toolbar=no')
+  }
+
   return (
     <header className="lg:hidden sticky top-0 z-30 bg-asphalt-deep/90 backdrop-blur border-b border-lane-dim/40 px-4 py-3 flex items-center justify-between">
       <div className="flex items-center gap-2">
@@ -99,9 +102,19 @@ function MobileHeader({ status, connected }) {
         </svg>
         <span className="font-code font-bold tracking-[0.14em] text-lane">RoadsEye</span>
       </div>
-      <div className="flex items-center gap-2 text-xs">
-        <span className={`w-2 h-2 rounded-full ${connected ? 'bg-go' : 'bg-stop'}`} />
-        <span className="font-code text-lane">{(status?.fps ?? 0).toFixed(0)} fps</span>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={openDatabaseWindow}
+          className="font-code text-[11px] px-2.5 py-1 rounded border border-lane/50 text-lane font-bold bg-lane/10 cursor-pointer flex items-center gap-1"
+        >
+          <span>📊 Database</span>
+          <span className="text-[9px]">↗</span>
+        </button>
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className={`w-2 h-2 rounded-full ${connected ? 'bg-go' : 'bg-stop'}`} />
+          <span className="font-code text-lane">{(status?.fps ?? 0).toFixed(0)} fps</span>
+        </div>
       </div>
     </header>
   )
@@ -118,9 +131,19 @@ function RailTitle({ children }) {
 }
 
 export default function App() {
-  const { status, refresh }        = usePipelineStatus()
-  const { connected, metrics }     = useMetricsStream(true)
-  const { latest, history, alerts } = metrics
+  const isDatabaseWindow =
+    typeof window !== 'undefined' &&
+    (new URLSearchParams(window.location.search).get('view') === 'database' ||
+      window.location.pathname === '/database')
+
+  // If this window was opened as the Database Viewer, render it directly
+  if (isDatabaseWindow) {
+    return <DatabaseViewer />
+  }
+
+  const { status, refresh } = usePipelineStatus()
+  const { connected, metrics } = useMetricsStream(true)
+  const { latest, history } = metrics
 
   const pipelineRunning = status?.running ?? false
 
@@ -133,50 +156,60 @@ export default function App() {
     return () => clearInterval(id)
   }, [pipelineRunning])
 
+  // Live vehicles-per-minute (WIB) for the timeline chart + KPI tile.
+  const [perMinute, setPerMinute] = useState([])
+  const loadPerMinute = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/analytics/events/per-minute?minutes=30`)
+      if (res.ok) setPerMinute(await res.json())
+    } catch { /* backend not up yet */ }
+  }, [])
+  useEffect(() => {
+    loadPerMinute()
+    const id = setInterval(loadPerMinute, 15_000)
+    return () => clearInterval(id)
+  }, [loadPerMinute])
+
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
-      <ControlRail status={status} connected={connected} onRefresh={refresh} latest={latest} />
-      <MobileHeader status={status} connected={connected} />
+      <ControlRail
+        status={status}
+        connected={connected}
+        onRefresh={refresh}
+        latest={latest}
+      />
+      <MobileHeader
+        status={status}
+        connected={connected}
+      />
 
       {/* Monitoring deck */}
       <main className="flex-1 min-w-0 p-4 lg:p-6 flex flex-col gap-5">
-        {/* CCTV hero — KPI mini strip di atas video */}
+        {/* CCTV hero — KPI mini strip above video */}
         <section>
-          <RailTitle>Cctv Live</RailTitle>
+          <RailTitle>Live CCTV</RailTitle>
           <div className="mb-2">
-            <StatsCards latest={latest} pipelineStatus={status} />
+            <StatsCards latest={latest} perMinute={perMinute} pipelineStatus={status} />
           </div>
           <VideoFeed enabled={pipelineRunning} />
         </section>
 
-        {/* Charts */}
-        <section className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          <div>
-            <RailTitle>Vehicles In Frame</RailTitle>
-            <VehicleCountChart history={history} />
-          </div>
-          <div>
-            <RailTitle>Speed Distribution</RailTitle>
-            <SpeedDistribution history={history} />
-          </div>
+        {/* Live traffic chart — time horizontal, vehicles vertical */}
+        <section>
+          <RailTitle>Vehicles Per Minute</RailTitle>
+          <VehicleCountChart data={perMinute} />
         </section>
 
-        {/* Track overlay — full width */}
+        {/* Persistent history (SQLite) — circular donut chart + database access */}
         <section>
-          <RailTitle>Track Overlay</RailTitle>
-          <TrafficFlowMap latest={latest} pipelineStatus={status} />
-        </section>
-
-        {/* Persistent history (SQLite) — historical totals + event table */}
-        <section>
-          <RailTitle>Riwayat Persisten</RailTitle>
+          <RailTitle>Persistent History</RailTitle>
           <HistoryPanel refreshKey={historyKey} />
         </section>
 
-        {/* Alerts — full-width strip */}
+        {/* Vehicle Timestamp — live feed */}
         <section>
-          <RailTitle>Alerts</RailTitle>
-          <AlertsPanel alerts={alerts} />
+          <RailTitle>Vehicle Timestamp Feed</RailTitle>
+          <VehicleTimestampFeed latest={latest} />
         </section>
       </main>
     </div>

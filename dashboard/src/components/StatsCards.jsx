@@ -2,16 +2,17 @@ import { useEffect, useState } from 'react'
 
 /**
  * KpiStrip — compact stat row above the CCTV feed.
- * Uptime = start→now wallclock, detik berjalan realtime.
+ * Uptime = start→now wallclock, live ticking seconds.
  */
-export default function StatsCards({ latest, pipelineStatus }) {
+export default function StatsCards({ latest, perMinute = [], pipelineStatus }) {
   const running  = pipelineStatus?.running ?? false
   const upSec    = pipelineStatus?.uptime_seconds ?? null
+  const thisMinute = perMinute.length ? perMinute[perMinute.length - 1].vehicles : null
   const cards = [
     { label: 'TOTAL',       value: latest?.total_count ?? '—',      color: 'text-lane',  icon: 'car' },
-    { label: 'IN FRAME',    value: latest?.vehicles_in_frame ?? '—', color: 'text-chalk', icon: 'radar' },
+    { label: 'PER MINUTE',  value: thisMinute ?? '—',               color: 'text-chalk', icon: 'radar' },
     { label: 'AVG KM/H',    value: latest?.avg_speed_kmh != null ? latest.avg_speed_kmh.toFixed(1) : '—', color: 'text-lane', icon: 'speed' },
-    { label: 'MULAI → KINI', value: null, color: 'text-chalk', icon: 'clock', clock: true },
+    { label: 'START → NOW', value: null, color: 'text-chalk', icon: 'clock', clock: true },
   ]
 
   const ICONS = {
@@ -64,7 +65,7 @@ export default function StatsCards({ latest, pipelineStatus }) {
 const _p2 = (n) => String(n).padStart(2, '0')
 const _hhmmss = (d) => `${_p2(d.getHours())}:${_p2(d.getMinutes())}:${_p2(d.getSeconds())}`
 
-/** start→now wallclock; detik berjalan realtime, tiap detik re-render */
+/** start→now wallclock; live ticking seconds, re-renders every second */
 function RunClock({ uptimeSeconds, running }) {
   const [anchor, setAnchor] = useState(null)   // pipeline start wallclock (ms)
   const [now, setNow]       = useState(() => new Date())
@@ -72,7 +73,7 @@ function RunClock({ uptimeSeconds, running }) {
   useEffect(() => {
     if (!running || uptimeSeconds == null) { setAnchor(null); return }
     const candidate = Date.now() - uptimeSeconds * 1000
-    // polling tiap 3 dtk menghasilkan dugaan start yang bergeser — kunci paling awal
+    // polling every 3s produces shifted start estimates — lock to earliest
     setAnchor(prev => (prev == null || candidate < prev) ? candidate : prev)
   }, [running, uptimeSeconds])
 

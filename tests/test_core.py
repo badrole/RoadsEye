@@ -137,6 +137,23 @@ class TestAnalyticsEngine:
 
         assert metrics.total_count == 1
 
+    def test_line_specs_preserve_counts_on_edit(self):
+        from core.analytics import CountingLineSpec
+        engine = AnalyticsEngine(counting_lines=[CountingLineSpec("line1", (0, 100), (1280, 100))])
+
+        # Cross line1
+        engine.update([make_track(1, 0, 0, 100, 80)])
+        metrics = engine.update([make_track(1, 0, 120, 100, 200)])
+        assert metrics.total_count == 1
+
+        # Move line1 to new coordinates (e.g. y=350)
+        engine.set_line_specs([CountingLineSpec("line1", (0, 350), (1280, 350))])
+
+        # Total count must NOT reset to 0!
+        m2 = engine.update([])
+        assert m2.total_count == 1
+        assert m2.count_per_line["line1"] == 1
+
     def test_tracks_in_metrics(self):
         engine = AnalyticsEngine()
         tracks = [make_track(42, 0, 0, 100, 100, class_id=1)]

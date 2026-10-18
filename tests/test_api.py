@@ -48,7 +48,7 @@ async def test_health(client: AsyncClient):
 async def test_root(client: AsyncClient):
     r = await client.get("/")
     assert r.status_code == 200
-    assert "TrafficVision" in r.json()["message"]
+    assert "RoadsEye" in r.json()["message"]
 
 
 # ── Pipeline status (not running) ─────────────────────────────────────────────
