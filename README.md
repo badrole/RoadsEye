@@ -8,7 +8,7 @@ Real-time vehicle detection, tracking, and traffic analytics dashboard — detek
 [![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-3.4-06B6D4?style=flat&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-FFCC00?style=flat)](https://docs.ultralytics.com)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-GPU_1.22-005CED?style=flat)](https://onnxruntime.ai)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 
 ---
 
