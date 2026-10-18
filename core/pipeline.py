@@ -198,7 +198,10 @@ class Pipeline:
                 if fps < 10.0:
                     fps = 10.0
                 frame_interval = 1.0 / fps
-                stride = max(self.config.skip_frames, 2)
+                # Detect every paced frame — GPU inference (~20 ms) comfortably
+                # fits the source interval, and skipping frames makes small
+                # fast objects (motorcycles) flicker out of the tracker.
+                stride = max(self.config.skip_frames, 0)
 
                 latest: dict = {"frame": None, "idx": 0}
                 lock = threading.Lock()
