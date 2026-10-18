@@ -42,7 +42,6 @@ class VideoSource:
         self._cap: cv2.VideoCapture | None = None
         self._frame_idx: int = 0
         self._t0: float = 0.0
-        self._backlog_dropped: int = 0   # live-buffered frames skipped to stay on the live edge
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -149,21 +148,9 @@ class VideoSource:
         ret, frame = self._cap.read()
 
         if self.is_live and ret:
-            # grab() is cheap (< a few ms) while the frame comes from the local
-            # buffer — discard those; the frame that costs real network time is
-            # the freshest one, so retrieve it as ours.
-            while True:
-                t0 = time.perf_counter()
-                ok = self._cap.grab()
-                if not ok:
-                    break
-                if time.perf_counter() - t0 < 0.004:
-                    self._backlog_dropped += 1
-                    continue
-                ok2, fresher = self._cap.retrieve()
-                if ok2 and fresher is not None:
-                    frame = fresher
-                break
+            # Paced real-time reading happens in the pipeline's reader thread;
+            # no drain here — draining fast-forwards beyond the live edge.
+            pass
 
         if not ret:
             if self.loop and not self.is_live:
@@ -171,6 +158,11 @@ class VideoSource:
                 ret, frame = self._cap.read()
                 if not ret:
                     return None, self._make_meta()
+
+        if self.is_live and ret:
+            # Paced real-time reading happens in the pipeline's reader thread;
+            # no drain here — draining fast-forwards beyond the live edge.
+            pass
 
         if frame is not None and (self._target_w or self._target_h):
             frame = self._resize(frame)

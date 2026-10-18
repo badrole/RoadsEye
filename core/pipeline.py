@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Generator
@@ -18,8 +19,19 @@ import cv2
 import numpy as np
 
 from core.analytics import AnalyticsEngine, CountingLineSpec, FrameMetrics
-from core.tracker import Tracker
+from core.tracker import Tracker, Track
 from core.video_source import VideoSource
+
+
+def _as_track(row: dict) -> Track:
+    """Lightweight Track view over a serialized metrics track dict."""
+    t = object.__new__(Track)
+    t.track_id = int(row["id"])
+    t.bbox = tuple(row["bbox"])
+    t.confidence = float(row.get("confidence", 1.0))
+    t.class_id = int(row.get("class_id", 0))
+    t.class_name = str(row.get("class_name", "unknown"))
+    return t
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -174,32 +186,97 @@ class Pipeline:
         self.setup()
         self._running = True
         loop = asyncio.get_event_loop()
-        read = None
-        if not self.config.demo_mode:
-            frame_iter = iter(self._source.stream(skip=self.config.skip_frames))
-
-            def read() -> tuple[np.ndarray, FrameMeta] | None:  # noqa: F811
-                try:
-                    return next(frame_iter)
-                except StopIteration:
-                    return None
         try:
             if self.config.demo_mode:
                 async for result in self._run_demo_async(loop):
                     yield result
             else:
-                while self._running:
-                    item = await loop.run_in_executor(None, read)
-                    if item is None:
-                        break
-                    frame, meta = item
-                    result = await loop.run_in_executor(
-                        None, self._process_live_frame, frame, meta.index
-                    )
-                    yield result
-                    await asyncio.sleep(0)
+                # Threaded reader + paced output: video flows at the source's
+                # native fps while the detector runs on a stride, so the stream
+                # stays smooth instead of skipping between processed frames.
+                fps = self._source.fps or 25.0
+                if fps < 10.0:
+                    fps = 10.0
+                frame_interval = 1.0 / fps
+                stride = max(self.config.skip_frames, 2)
+
+                latest: dict = {"frame": None, "idx": 0}
+                lock = threading.Lock()
+
+                def reader() -> None:
+                    # Pace reading at the source's true fps: decoding an HLS
+                    # faster than real-time shows as 2x-speed video with
+                    # buffering stalls when the demuxer runs dry.
+                    fails = 0
+                    reopens = 0
+                    t_start = time.monotonic()
+                    while self._running:
+                        frame, meta = self._source.read()
+                        if frame is None:
+                            # Live sources retry (FFmpeg segment hiccup); files end.
+                            if not self._source.is_live:
+                                self._running = False
+                                break
+                            fails += 1
+                            if fails >= 30:      # ~3 dead seconds
+                                if reopens < 3:
+                                    reopens += 1
+                                    print(f"[Pipeline] Live source stalled — re-opening ({reopens}/3)")
+                                    try:
+                                        self._source.close()
+                                        self._source.open()
+                                        t_start = time.monotonic()
+                                    except Exception as exc:
+                                        print(f"[Pipeline] Re-open failed: {exc}")
+                                    fails = 0
+                                    continue
+                                self._running = False
+                                break
+                            time.sleep(0.1)
+                            continue
+                        fails = 0
+                        with lock:
+                            latest["frame"] = frame
+                            latest["idx"] = meta.index
+                        # Throttle to real time: one frame per source-fps tick.
+                        target = t_start + (meta.index + 1) * frame_interval
+                        now = time.monotonic()
+                        wait = target - now
+                        if wait > 0:
+                            time.sleep(wait)
+                        else:
+                            t_start = now - (meta.index + 1) * frame_interval   # resync drift
+
+                rt = threading.Thread(target=reader, name="video-reader", daemon=True)
+                rt.start()
+
+                counter = 0
+                cached_metrics: FrameMetrics | None = None
+                try:
+                    while self._running:
+                        t0 = time.perf_counter()
+                        with lock:
+                            frame = latest["frame"]
+                            idx = latest["idx"]
+                        if frame is None or cached_metrics is None and counter % (stride + 1) != 0:
+                            await asyncio.sleep(frame_interval * 0.5)
+                            continue
+                        if counter % (stride + 1) == 0:
+                            jpeg_bytes, cached_metrics = await loop.run_in_executor(
+                                None, self._process_live_frame, frame, idx
+                            )
+                        else:
+                            jpeg_bytes = self._encode_jpeg(self._draw_reuse(frame, cached_metrics))
+                            cached_metrics.frame_index += 1
+                        yield jpeg_bytes, cached_metrics
+                        counter += 1
+                        wait = frame_interval - (time.perf_counter() - t0)
+                        if wait > 0:
+                            await asyncio.sleep(wait)
+                finally:
+                    self.teardown()
         finally:
-            self.teardown()
+            self._running = False
 
     async def _run_demo_async(
         self, loop: asyncio.AbstractEventLoop
@@ -215,6 +292,10 @@ class Pipeline:
                 await asyncio.sleep(wait)
 
     # ── Frame processing ──────────────────────────────────────────────────────
+
+    def _draw_reuse(self, frame: np.ndarray, metrics: FrameMetrics) -> np.ndarray:
+        """Annotate a frame between detector strides using the latest metrics."""
+        return self._draw(frame, [_as_track(t) for t in metrics.tracks], metrics)
 
     def _process_demo_frame(self) -> tuple[bytes, FrameMetrics]:
         frame, detections = self._demo_gen.generate()
