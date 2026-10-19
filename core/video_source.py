@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ class FrameMeta:
     index: int          # absolute frame number since source opened
     timestamp: float    # wall-clock seconds since source opened
     source: str         # path or stream URL
+    pos_ms: float = 0.0 # stream playback position (PTS) in milliseconds
 
 
 class VideoSource:
@@ -40,8 +42,10 @@ class VideoSource:
         self._target_h = height
         self.loop = loop
         self._cap: cv2.VideoCapture | None = None
+        self._io_lock = threading.Lock()   # read() vs close()/release() — FFmpeg aborts on overlap
         self._frame_idx: int = 0
         self._t0: float = 0.0
+        self._pos_ms: float = 0.0
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -58,8 +62,8 @@ class VideoSource:
     # waits for full probe/analyze and buffers whole segments → read rate ~15fps
     # instead of the source's 20+fps, and the feed lags behind live.
     _LIVE_FFMPEG_OPTIONS = (
-        "fflags;nobuffer|flags;low_delay|analyzeduration;1000000|probesize;500000|"
-        "timeout;5000000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"
+        "fflags;nobuffer|flags;low_delay|analyzeduration;2000000|probesize;1000000|"
+        "max_delay;500000|timeout;10000000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"
     )
 
     def open(self) -> None:
@@ -94,9 +98,10 @@ class VideoSource:
         return s.startswith("rtsp") or s.startswith(("http://", "https://")) or ".m3u8" in s
 
     def close(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+        with self._io_lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -139,35 +144,23 @@ class VideoSource:
     def read(self) -> tuple[np.ndarray | None, FrameMeta]:
         """Read a single frame. Returns (None, meta) on end-of-stream.
 
-        For live sources every read also drains buffered frames that arrived
-        while the previous frame was being processed, keeping the processed
-        frame at the live edge (video no longer falls behind and then skips)."""
-        if self._cap is None:
-            raise RuntimeError("VideoSource not opened. Call open() first.")
-
-        ret, frame = self._cap.read()
-
-        if self.is_live and ret:
-            # Paced real-time reading happens in the pipeline's reader thread;
-            # no drain here — draining fast-forwards beyond the live edge.
-            pass
-
-        if not ret:
-            if self.loop and not self.is_live:
+        The I/O lock keeps cap.read() and cap.release() from overlapping:
+        OpenCV/FFmpeg hard-aborts the whole process (async_lock assertion)
+        when release() races an in-flight read."""
+        with self._io_lock:
+            if self._cap is None:
+                return None, self._make_meta()
+            ret, frame = self._cap.read()
+            if not ret and self.loop and not self.is_live:
                 self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = self._cap.read()
-                if not ret:
-                    return None, self._make_meta()
-
-        if self.is_live and ret:
-            # Paced real-time reading happens in the pipeline's reader thread;
-            # no drain here — draining fast-forwards beyond the live edge.
-            pass
-
-        if frame is not None and (self._target_w or self._target_h):
-            frame = self._resize(frame)
-
-        meta = self._make_meta()
+            if frame is not None and (self._target_w or self._target_h):
+                frame = self._resize(frame)
+            try:
+                self._pos_ms = float(self._cap.get(cv2.CAP_PROP_POS_MSEC))
+            except Exception:
+                self._pos_ms = 0.0
+        meta = self._make_meta(pos_ms=self._pos_ms)
         self._frame_idx += 1
         return frame, meta
 
@@ -190,11 +183,12 @@ class VideoSource:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _make_meta(self) -> FrameMeta:
+    def _make_meta(self, pos_ms: float = 0.0) -> FrameMeta:
         return FrameMeta(
             index=self._frame_idx,
             timestamp=time.monotonic() - self._t0,
             source=str(self.source),
+            pos_ms=pos_ms,
         )
 
     def _resize(self, frame: np.ndarray) -> np.ndarray:

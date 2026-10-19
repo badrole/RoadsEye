@@ -234,6 +234,7 @@ class PipelineStatus(BaseModel):
     uptime_seconds: float = 0.0
     fps: float = 0.0
     demo_mode: bool = False
+    preroll_pct: int | None = None   # 0-99 while the pre-roll buffer downloads
     counting_lines: list[CountingLineStatus] = Field(default_factory=list)
 
 

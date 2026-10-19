@@ -191,7 +191,7 @@ export default function App() {
           <div className="mb-2">
             <StatsCards latest={latest} perMinute={perMinute} pipelineStatus={status} />
           </div>
-          <VideoFeed enabled={pipelineRunning} />
+          <VideoFeed enabled={pipelineRunning} prerollPct={status?.preroll_pct} />
         </section>
 
         {/* Live traffic chart — time horizontal, vehicles vertical */}

@@ -55,6 +55,18 @@ class PipelineConfig:
         return str(self.source).lower() == "demo"
 
 
+class _ReusedTrack:
+    """Lightweight track proxy for reusing cached detections on fresh frames."""
+    def __init__(self, d: dict) -> None:
+        self.track_id = int(d.get("id", 0))
+        self.bbox = tuple(d.get("bbox", (0, 0, 0, 0)))
+        self.class_id = int(d.get("class_id", 0))
+        self.class_name = str(d.get("class_name", "vehicle"))
+
+def _as_track(d: dict) -> _ReusedTrack:
+    return _ReusedTrack(d)
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 class Pipeline:
@@ -88,9 +100,10 @@ class Pipeline:
         (0, 255, 100),
     ]
 
-    def __init__(self, config: PipelineConfig | None = None) -> None:
+    def __init__(self, config: PipelineConfig | None = None, counting_enabled: bool = True) -> None:
         self.config = config or PipelineConfig()
         self._running = False
+        self._counting_enabled = counting_enabled
 
         self._source:    VideoSource | None = None
         self._detector                      = None   # core.detector.Detector
@@ -98,6 +111,8 @@ class Pipeline:
         self._analytics: AnalyticsEngine | None = None
         self._demo_gen                      = None   # core.demo_generator.DemoGenerator
         self._initial_counts: dict[str, int] = {}
+        self._line_flash: dict[str, int] = {}       # line_name -> remaining flash frames
+        self._crossed_flash: dict[int, int] = {}    # track_id -> remaining flash frames
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -120,12 +135,18 @@ class Pipeline:
             )
             fps = self._source.fps or 25.0
 
-        self._tracker   = Tracker(frame_rate=int(fps))
+        self._tracker = Tracker(
+            frame_rate=int(fps),
+            track_activation_threshold=0.25,
+            lost_track_buffer=30,
+            minimum_matching_threshold=0.8,
+        )
         self._analytics = AnalyticsEngine(
             counting_lines=cfg.counting_lines or [],
             pixels_per_meter=cfg.pixels_per_meter,
             fps=fps,
         )
+        self._analytics.counting_enabled = self._counting_enabled
         if self._initial_counts:
             self._analytics.set_today_baseline(self._initial_counts)
 
@@ -153,6 +174,11 @@ class Pipeline:
         self._initial_counts = dict(baseline or {})
         if self._analytics:
             self._analytics.set_today_baseline(self._initial_counts)
+
+    def set_counting_enabled(self, enabled: bool) -> None:
+        """Gate tallying (side state stays warm) — used during timeshift load."""
+        if self._analytics is not None:
+            self._analytics.counting_enabled = bool(enabled)
 
     # ── Sync runner ───────────────────────────────────────────────────────────
 
@@ -197,86 +223,117 @@ class Pipeline:
                 fps = self._source.fps or 25.0
                 if fps < 10.0:
                     fps = 10.0
-                frame_interval = 1.0 / fps
-                # Detect every paced frame — GPU inference (~20 ms) comfortably
+                frame_interval = 1.0 / fps                # Detect every paced frame — GPU inference (~20 ms) comfortably
                 # fits the source interval, and skipping frames makes small
                 # fast objects (motorcycles) flicker out of the tracker.
                 stride = max(self.config.skip_frames, 0)
 
-                latest: dict = {"frame": None, "idx": 0}
+                latest: dict = {"frame": None, "idx": 0, "seq": 0}
                 lock = threading.Lock()
 
+                closing = threading.Event()
+
                 def reader() -> None:
-                    # Pace reading at the source's true fps: decoding an HLS
-                    # faster than real-time shows as 2x-speed video with
-                    # buffering stalls when the demuxer runs dry.
                     fails = 0
                     reopens = 0
-                    t_start = time.monotonic()
-                    while self._running:
+                    t_prev = time.monotonic()
+                    while self._running and not closing.is_set():
                         frame, meta = self._source.read()
                         if frame is None:
-                            # Live sources retry (FFmpeg segment hiccup); files end.
+                            if closing.is_set():
+                                break
                             if not self._source.is_live:
                                 self._running = False
                                 break
                             fails += 1
-                            if fails >= 30:      # ~3 dead seconds
-                                if reopens < 3:
+                            if fails >= 25:
+                                if reopens < 5:
                                     reopens += 1
-                                    print(f"[Pipeline] Live source stalled — re-opening ({reopens}/3)")
+                                    print(f"[Pipeline] Live source stalled — re-opening ({reopens}/5)")
                                     try:
                                         self._source.close()
                                         self._source.open()
-                                        t_start = time.monotonic()
+                                        t_prev = time.monotonic()
                                     except Exception as exc:
                                         print(f"[Pipeline] Re-open failed: {exc}")
                                     fails = 0
                                     continue
                                 self._running = False
                                 break
-                            time.sleep(0.1)
+                            time.sleep(0.04)
                             continue
                         fails = 0
+                        reopens = 0
                         with lock:
                             latest["frame"] = frame
                             latest["idx"] = meta.index
-                        # Throttle to real time: one frame per source-fps tick.
-                        target = t_start + (meta.index + 1) * frame_interval
+                            latest["seq"] += 1
+
+                        # Smooth nominal pace to prevent runaway reading
                         now = time.monotonic()
-                        wait = target - now
+                        elapsed = now - t_prev
+                        wait = frame_interval - elapsed
                         if wait > 0:
-                            time.sleep(wait)
-                        else:
-                            t_start = now - (meta.index + 1) * frame_interval   # resync drift
+                            time.sleep(min(wait, frame_interval))
+                        t_prev = time.monotonic()
 
                 rt = threading.Thread(target=reader, name="video-reader", daemon=True)
                 rt.start()
 
-                counter = 0
-                cached_metrics: FrameMetrics | None = None
-                try:
-                    while self._running:
-                        t0 = time.perf_counter()
+                c_lock = threading.Lock()
+                cache: dict = {"jpeg": None, "metrics": None, "seq": 0, "idx": -1}
+
+                def worker() -> None:
+                    """Dedicated inference thread: grabs newest frame, runs
+                    detect+track+draw+encode. Each frame is consumed exactly
+                    once via the seq counter — prevents double-counting."""
+                    last_consumed_seq = 0
+                    while self._running and not closing.is_set():
                         with lock:
                             frame = latest["frame"]
                             idx = latest["idx"]
-                        if frame is None or cached_metrics is None and counter % (stride + 1) != 0:
-                            await asyncio.sleep(frame_interval * 0.5)
+                            rseq = latest["seq"]
+                        if frame is None or rseq == last_consumed_seq:
+                            time.sleep(0.003)
                             continue
-                        if counter % (stride + 1) == 0:
-                            jpeg_bytes, cached_metrics = await loop.run_in_executor(
-                                None, self._process_live_frame, frame, idx
+                        last_consumed_seq = rseq
+                        try:
+                            jpeg, met = self._process_live_frame(frame, idx)
+                        except Exception as exc:
+                            print(f"[Pipeline] inference worker: {exc}")
+                            time.sleep(0.02)
+                            continue
+                        with c_lock:
+                            cache["jpeg"] = jpeg
+                            cache["metrics"] = met
+                            cache["seq"] += 1
+                            cache["idx"] = idx
+
+                wt = threading.Thread(target=worker, name="inference-worker", daemon=True)
+                wt.start()
+
+                last_drawn_seq = -1
+                try:
+                    while self._running:
+                        t0 = time.perf_counter()
+                        with c_lock:
+                            jpeg_bytes, cached_metrics, produced = (
+                                cache["jpeg"], cache["metrics"], cache["seq"]
                             )
-                        else:
-                            jpeg_bytes = self._encode_jpeg(self._draw_reuse(frame, cached_metrics))
-                            cached_metrics.frame_index += 1
+                        if jpeg_bytes is None or cached_metrics is None or produced == last_drawn_seq:
+                            await asyncio.sleep(0.003)
+                            continue
+
+                        last_drawn_seq = produced
                         yield jpeg_bytes, cached_metrics
-                        counter += 1
+
                         wait = frame_interval - (time.perf_counter() - t0)
                         if wait > 0:
                             await asyncio.sleep(wait)
                 finally:
+                    closing.set()
+                    rt.join(timeout=2.0)
+                    wt.join(timeout=2.0)
                     self.teardown()
         finally:
             self._running = False
@@ -297,13 +354,17 @@ class Pipeline:
     # ── Frame processing ──────────────────────────────────────────────────────
 
     def _draw_reuse(self, frame: np.ndarray, metrics: FrameMetrics) -> np.ndarray:
-        """Annotate a frame between detector strides using the latest metrics."""
+        """Annotate a frame using metrics."""
         return self._draw(frame, [_as_track(t) for t in metrics.tracks], metrics)
 
     def _process_demo_frame(self) -> tuple[bytes, FrameMetrics]:
         frame, detections = self._demo_gen.generate()
         tracks   = self._tracker.update(detections)
         metrics  = self._analytics.update(tracks)
+        if metrics.crossings:
+            for c in metrics.crossings:
+                self._line_flash[c.line_name] = 8
+                self._crossed_flash[c.track_id] = 10
         annotated = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
 
@@ -313,6 +374,10 @@ class Pipeline:
         detections = self._detector.detect(frame)
         tracks     = self._tracker.update(detections)
         metrics    = self._analytics.update(tracks)
+        if metrics.crossings:
+            for c in metrics.crossings:
+                self._line_flash[c.line_name] = 8
+                self._crossed_flash[c.track_id] = 10
         annotated  = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
 
@@ -339,27 +404,52 @@ class Pipeline:
     ) -> np.ndarray:
         out = frame.copy()
 
-        # Draw each counting line with its label and live count
+        # Draw each counting line with its label and live count (flashing on crossing)
         for idx, spec in enumerate(self.config.counting_lines):
-            color = self._LINE_COLORS[idx % len(self._LINE_COLORS)]
+            is_flashing = self._line_flash.get(spec.name, 0) > 0
+            if is_flashing:
+                self._line_flash[spec.name] -= 1
+                color = (0, 255, 0)      # neon green flash on crossing
+                thickness = 4
+                tag = " [HIT!]"
+            else:
+                color = self._LINE_COLORS[idx % len(self._LINE_COLORS)]
+                thickness = 2
+                tag = ""
+
             p1 = (int(spec.p1[0]), int(spec.p1[1]))
             p2 = (int(spec.p2[0]), int(spec.p2[1]))
-            cv2.line(out, p1, p2, color, 2)
+            cv2.line(out, p1, p2, color, thickness)
             count = metrics.count_per_line.get(spec.name, 0)
-            label = f"{spec.name}: {count}"
+            label = f"{spec.name}: {count}{tag}"
             cv2.putText(out, label, (p1[0] + 4, p1[1] + 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-        # Draw track boxes
+        # Draw track boxes and tracking centroids
         speed_map = {t["id"]: t.get("speed_kmh") for t in metrics.tracks}
         for track in tracks:
             x1, y1, x2, y2 = [int(v) for v in track.bbox]
-            color = self._COLORS[track.class_id % len(self._COLORS)]
-            cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+            is_counted = self._crossed_flash.get(track.track_id, 0) > 0
+            if is_counted:
+                self._crossed_flash[track.track_id] -= 1
+                color = (0, 255, 0)      # neon green highlight on crossed vehicle
+                box_thick = 3
+                hit_badge = " [COUNTED]"
+            else:
+                color = self._COLORS[track.class_id % len(self._COLORS)]
+                box_thick = 2
+                hit_badge = ""
+
+            cv2.rectangle(out, (x1, y1), (x2, y2), color, box_thick)
+
+            # Draw vehicle tracking centroid dot (gives instant visual proof when center touches line)
+            cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+            cv2.circle(out, (cx, cy), 3, (0, 255, 255), -1)
+            cv2.circle(out, (cx, cy), 4, (0, 0, 0), 1)
 
             spd = speed_map.get(track.track_id)
             spd_str = f" {spd:.0f}km/h" if spd is not None else ""
-            label = f"#{track.track_id} {track.class_name}{spd_str}"
+            label = f"#{track.track_id} {track.class_name}{spd_str}{hit_badge}"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             cv2.rectangle(out, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
             cv2.putText(out, label, (x1 + 2, y1 - 4),

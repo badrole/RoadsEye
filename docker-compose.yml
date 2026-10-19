@@ -31,6 +31,8 @@ services:
       - API_PORT=8000
       - CORS_ORIGINS=http://localhost:3000,http://localhost:80,http://localhost,http://dashboard
       - DATABASE_URL=sqlite+aiosqlite:///./data/db/trafficvision.db
+      - DATABASE_PATH=/app/data/db/traffic.db
+      - ROADSEYE_DB_PATH=/root/.roadseye/data/roadseye.db
       - RING_BUFFER_SECONDS=${RING_BUFFER_SECONDS:-300}
       - JPEG_QUALITY=${JPEG_QUALITY:-80}
       - METRICS_INTERVAL_MS=${METRICS_INTERVAL_MS:-500}

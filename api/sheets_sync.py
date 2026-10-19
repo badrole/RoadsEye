@@ -221,7 +221,7 @@ def sync_to_google_sheets() -> dict[str, Any]:
         # ── 1. Sync Raw Events to Vehicle_Events ──────────────────────────────
         events_resp = service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id,
-            range="Vehicle_Events!A1:B"
+            range="Vehicle_Events!A1:C"
         ).execute()
         existing_rows = events_resp.get("values", [])
         num_existing = len(existing_rows)
@@ -232,35 +232,44 @@ def sync_to_google_sheets() -> dict[str, Any]:
                 spreadsheetId=spreadsheet_id,
                 range="Vehicle_Events!A1",
                 valueInputOption="USER_ENTERED",
-                body={"values": [["Timestamp", "Vehicle Class"]]}
+                body={"values": [["Timestamp", "Vehicle Class", "Event ID"]]}
             ).execute()
             num_existing = 1
 
+        existing_ids = set()
+        for r in existing_rows[1:]:
+            if len(r) >= 3 and r[2]:
+                existing_ids.add(str(r[2]))
+            elif len(r) >= 1 and r[0]:
+                existing_ids.add(str(r[0]))
+
         # Fetch all events from SQLite
         all_events = conn.execute(
-            "SELECT timestamp_epoch, vehicle_type FROM vehicle_events ORDER BY timestamp_epoch ASC"
+            "SELECT event_id, timestamp_epoch, vehicle_type FROM vehicle_events ORDER BY timestamp_epoch ASC"
         ).fetchall()
 
-        # If sheet has fewer rows than db + header, append missing rows
-        new_events_written = 0
-        if len(all_events) > (num_existing - 1):
-            missing_events = all_events[num_existing - 1:]
-            append_values = []
-            for ev in missing_events:
-                dt = _dt.datetime.fromtimestamp(ev["timestamp_epoch"], tz=wib_tz)
-                ts_str = dt.strftime("%Y-%m-%d %H:%M:%S WIB")
-                cls_str = str(ev["vehicle_type"]).capitalize()
-                append_values.append([ts_str, cls_str])
+        append_values = []
+        for ev in all_events:
+            ev_id = str(ev["event_id"])
+            if ev_id in existing_ids:
+                continue
+            dt = _dt.datetime.fromtimestamp(ev["timestamp_epoch"], tz=wib_tz)
+            ts_str = dt.strftime("%Y-%m-%d %H:%M:%S WIB")
+            if ts_str in existing_ids:
+                continue
+            cls_str = str(ev["vehicle_type"]).capitalize()
+            append_values.append([ts_str, cls_str, ev_id])
 
-            if append_values:
-                service.spreadsheets().values().append(
-                    spreadsheetId=spreadsheet_id,
-                    range="Vehicle_Events!A1",
-                    valueInputOption="USER_ENTERED",
-                    insertDataOption="INSERT_ROWS",
-                    body={"values": append_values}
-                ).execute()
-                new_events_written = len(append_values)
+        new_events_written = 0
+        if append_values:
+            service.spreadsheets().values().append(
+                spreadsheetId=spreadsheet_id,
+                range="Vehicle_Events!A1",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": append_values}
+            ).execute()
+            new_events_written = len(append_values)
 
         # ── 2. Build Daily Summary on 'MAIN' ──────────────────────────────────
         dates_rows = conn.execute("""

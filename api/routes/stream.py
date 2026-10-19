@@ -68,15 +68,7 @@ def _status_lines(content) -> list:
 @router.get("/pipeline/lines", response_model=LinesResponse)
 async def get_lines() -> LinesResponse:
     """Current counting line geometry (interactive editor hydration)."""
-    if manager._pipeline is not None:
-        active_lines = manager._pipeline.line_specs
-    elif manager._config and manager._config.counting_lines:
-        active_lines = manager._config.counting_lines
-    else:
-        active_lines = getattr(manager, "_default_lines", [])
-
-    counting = _status_lines(active_lines)
-    return LinesResponse(counting_lines=counting)
+    return LinesResponse(counting_lines=manager.status().counting_lines)
 
 
 @router.post("/pipeline/lines", response_model=LinesResponse)

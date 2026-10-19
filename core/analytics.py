@@ -73,19 +73,22 @@ class CountingLine:
 
     The line is defined by two points (x1,y1)→(x2,y2) in pixel coords.
     A crossing is detected when a track's centre moves from one side to the
-    other, crossing the hysteresis band around the line — a vehicle hovering
-    or oscillating within ±HYSTERESIS_PX of the line cannot re-trigger.
+    other.  After a crossing fires, the track enters a cooldown window
+    (CROSSING_COOLDOWN_FRAMES frames) during which it cannot re-trigger on
+    this line — this kills the double-count bug caused by tracker jitter or
+    repeated inference on the same frame.
     """
 
-    HYSTERESIS_PX = 10.0   # dead-band around the line (anti-oscillation)
+    CROSSING_COOLDOWN_FRAMES = 30
 
     def __init__(self, p1: tuple[int, int], p2: tuple[int, int]) -> None:
         self.p1 = np.array(p1, dtype=float)
         self.p2 = np.array(p2, dtype=float)
         self._prev_sides: dict[int, float] = {}
+        self._cooldowns: dict[int, int] = {}    # track_id → remaining cooldown frames
+        self._crossed_ids: dict[int, float] = {} # track_id → timestamp when crossed (anti-double-count)
         self.total_count: int = 0
         self.count_per_class: dict[str, int] = defaultdict(int)
-        # (track, prev_side, side) for each crossing in the LAST update() call
         self.last_crossings: list[tuple[Track, float, float]] = []
 
     def set_baseline_counts(self, baseline: dict[str, int]) -> None:
@@ -93,29 +96,46 @@ class CountingLine:
         self.count_per_class = defaultdict(int, baseline)
         self.total_count = sum(self.count_per_class.values())
 
-    def update(self, tracks: list[Track]) -> list[Track]:
-        """Check each track for a crossing. Returns newly-crossed tracks."""
+    def update(self, tracks: list[Track], count: bool = True) -> list[Track]:
+        """Check each track for a crossing. Returns newly-crossed tracks.
+
+        Reference logic (Traffic-Video-Analytics-Project): a crossing counts
+        the moment a track's CENTRE moves side across the line.
+        `count=False` keeps side state warm (timeshift buffer loading) without
+        tallying anything."""
         crossed = []
         current_ids = {t.track_id for t in tracks}
         self.last_crossings = []
+        now_ts = time.time()
+
+        # Tick cooldowns down
+        for tid in list(self._cooldowns):
+            self._cooldowns[tid] -= 1
+            if self._cooldowns[tid] <= 0:
+                del self._cooldowns[tid]
+
+        # Evict old crossed IDs after 60 seconds to avoid unbounded memory
+        for tid in list(self._crossed_ids):
+            if now_ts - self._crossed_ids[tid] > 60.0 and tid not in current_ids:
+                del self._crossed_ids[tid]
 
         for track in tracks:
             cx, cy = track.center
-            signed = self._signed_dist(cx, cy)
+            side = self._side(cx, cy)
 
-            # Only register a side when the track is clearly OFF the line —
-            # jitters/oscillation inside the dead-band never re-arm a count.
-            if abs(signed) >= self.HYSTERESIS_PX:
-                side = float(np.sign(signed))
-                prev = self._prev_sides.get(track.track_id)
-                if prev is not None and prev != 0 and prev != side:
+            prev = self._prev_sides.get(track.track_id)
+            if prev is not None and prev != 0 and side != 0 and prev != side:
+                if count and track.track_id not in self._crossed_ids and track.track_id not in self._cooldowns:
                     self.total_count += 1
                     self.count_per_class[track.class_name] += 1
                     crossed.append(track)
                     self.last_crossings.append((track, prev, side))
+                    self._cooldowns[track.track_id] = self.CROSSING_COOLDOWN_FRAMES
+                    self._crossed_ids[track.track_id] = now_ts
+            if side != 0:
                 self._prev_sides[track.track_id] = side
 
-        # Clean up lost tracks
+        # Clean up lost tracks side state
         for tid in list(self._prev_sides):
             if tid not in current_ids:
                 del self._prev_sides[tid]
@@ -126,15 +146,6 @@ class CountingLine:
         dx = self.p2[0] - self.p1[0]
         dy = self.p2[1] - self.p1[1]
         return float(np.sign(dx * (py - self.p1[1]) - dy * (px - self.p1[0])))
-
-    def _signed_dist(self, px: float, py: float) -> float:
-        """Signed perpendicular distance from the line (pixels)."""
-        dx = self.p2[0] - self.p1[0]
-        dy = self.p2[1] - self.p1[1]
-        norm = np.hypot(dx, dy)
-        if norm == 0:
-            return 0.0
-        return float((dx * (py - self.p1[1]) - dy * (px - self.p1[0])) / norm)
 
 
 # ── Speed estimator ──────────────────────────────────────────────────────────
@@ -325,6 +336,7 @@ class AnalyticsEngine:
     """
 
     SPEED_HISTORY_LEN = 50
+    WARMUP_FRAMES = 0
 
     def __init__(
         self,
@@ -346,6 +358,7 @@ class AnalyticsEngine:
         self._frame_index: int = 0
 
         # Asia/Jakarta calendar day tracking (WIB = UTC+7)
+        self.counting_enabled: bool = True   # gated off while the timeshift buffer loads
         wib_now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=7)))
         self._current_date_wib: str = wib_now.strftime("%Y-%m-%d")
         self._today_baseline: dict[str, int] = {}
@@ -354,10 +367,50 @@ class AnalyticsEngine:
         """Initialize or resume counts from today's database records.
 
         Allows counting to continue seamlessly across reconnects on the same day.
+        Applies to the primary counting line so total_count reflects the true daily total
+        without multiplying across multiple lines.
         """
         self._today_baseline = dict(baseline_counts or {})
-        for _, line in self._lines:
-            line.set_baseline_counts(self._today_baseline)
+        if self._lines:
+            self._lines[0][1].set_baseline_counts(self._today_baseline)
+            for _, line in self._lines[1:]:
+                line.set_baseline_counts({})
+
+    @property
+    def line_specs(self) -> list[CountingLineSpec]:
+        return [
+            CountingLineSpec(
+                name=name,
+                p1=(int(round(l.p1[0])), int(round(l.p1[1]))),
+                p2=(int(round(l.p2[0])), int(round(l.p2[1]))),
+            )
+            for name, l in self._lines
+        ]
+
+    def set_lines(self, counting_lines: list[CountingLineSpec]) -> None:
+        """Update line geometries while strictly preserving existing counts.
+        
+        Clears _prev_sides when endpoints change to prevent false crossings
+        when lines are moved across stationary or moving tracks.
+        """
+        new_lines: list[tuple[str, CountingLine]] = []
+        old_map = {name: line for name, line in self._lines}
+        for spec in (counting_lines or []):
+            if spec.name in old_map:
+                line = old_map[spec.name]
+                new_p1 = np.array(spec.p1, dtype=float)
+                new_p2 = np.array(spec.p2, dtype=float)
+                if not np.array_equal(line.p1, new_p1) or not np.array_equal(line.p2, new_p2):
+                    line.p1 = new_p1
+                    line.p2 = new_p2
+                    line._prev_sides.clear()  # reset side state to prevent ghost crossing
+                new_lines.append((spec.name, line))
+            else:
+                line = CountingLine(spec.p1, spec.p2)
+                new_lines.append((spec.name, line))
+        self._lines = new_lines
+
+    set_line_specs = set_lines
 
     def update(self, tracks: list[Track]) -> FrameMetrics:
         """Process one frame's tracks and return an analytics snapshot."""
@@ -380,8 +433,10 @@ class AnalyticsEngine:
         crossing_events: list[dict[str, Any]] = []
         frame_ts = time.time()
 
+        warmup_done = self._frame_index >= self.WARMUP_FRAMES
+        do_count = self.counting_enabled and warmup_done
         for name, line in self._lines:
-            line.update(tracks)
+            line.update(tracks, count=do_count)
             count_per_line[name] = line.total_count
             total_count += line.total_count
 

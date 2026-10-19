@@ -6,13 +6,27 @@ import { useRef } from 'react'
 import { useVideoStream } from '../hooks/useWebSocket'
 import LineEditor from './LineEditor'
 
-export default function VideoFeed({ enabled }) {
+export default function VideoFeed({ enabled, prerollPct = null }) {
   const canvasRef = useRef(null)
   const connected = useVideoStream(canvasRef, enabled)
+  const loading = prerollPct != null && prerollPct < 100
 
   return (
     <div className="relative w-full bg-asphalt-deep rounded-sm overflow-hidden border-2 border-lane-dim/60 shadow-glowlane">
       <LineEditor canvasRef={canvasRef} />
+
+      {/* Timeshift loading overlay — progress only */}
+      {loading && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-asphalt-deep/85 backdrop-blur-sm px-6">
+          <span className="font-code text-3xl font-extrabold text-lane">{prerollPct}%</span>
+          <div className="w-full max-w-md h-2.5 rounded bg-asphalt border border-lane-dim/40 overflow-hidden">
+            <div
+              className="h-full bg-lane transition-all duration-500"
+              style={{ width: `${prerollPct}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Plate — camera housing label */}
       <div className="absolute top-3 left-3 z-10 flex items-center gap-2">
@@ -29,11 +43,11 @@ export default function VideoFeed({ enabled }) {
         </span>
       </div>
 
-      {/* Canvas — fills container, keeps aspect ratio via object-fit */}
+      {/* Canvas — element keeps the video's own aspect (w/h auto), so the
+          overlay editor maps 1:1 with no letterbox offsets */}
       <canvas
         ref={canvasRef}
-        className="w-full h-full object-contain"
-        style={{ minHeight: 360 }}
+        className="w-full h-auto block"
       />
 
       {/* Placeholder when no frame has arrived yet */}

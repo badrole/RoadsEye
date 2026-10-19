@@ -6,8 +6,10 @@ WebSocket handlers consume frames from the async queue.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
+from collections import deque
 
 from core.pipeline import Pipeline, PipelineConfig
 from api.schemas import CountingLineStatus, MetricsMessage, PipelineStatus
@@ -40,10 +42,18 @@ class PipelineManager:
         self._video_queues: list[asyncio.Queue[bytes]] = []
         self._metrics_queues: list[asyncio.Queue[MetricsMessage]] = []
 
-        self._lock = asyncio.Lock()        # Default counting lines (fallback when stopped / hydration before start)
+        self._lock = asyncio.Lock()
+        # Default counting lines (fallback when stopped / hydration before start)
         self._default_lines = []
         self._load_default_lines()
         self._last_sheets_sync_time: float = 0.0
+        self._preroll_pct: int | None = None   # 0-99 while the timeshift buffer fills
+        self._stream_delay = max(0.0, float(os.environ.get("STREAM_DELAY_SECONDS", "0") or 0))
+        self._eff_delay = 0.0
+        self._delay_buffer: deque = deque()    # rolling (timestamp, jpeg) timeshift buffer
+        self._delay_start: float | None = None
+        self._counting_armed = True            # False while the timeshift buffer loads
+        self._delay_task: asyncio.Task | None = None
 
     def _load_default_lines(self) -> None:
         import json
@@ -73,8 +83,9 @@ class PipelineManager:
         return self._task is not None and not self._task.done()
 
     def status(self) -> PipelineStatus:
-        uptime = time.time() - self._start_time if self.running else 0.0
-        fps    = self._frame_index / uptime if uptime > 0 else 0.0
+        is_preroll = self._preroll_pct is not None and self.running
+        uptime = 0.0 if is_preroll else (time.time() - self._start_time if self.running else 0.0)
+        fps    = 0.0 if is_preroll else (self._frame_index / uptime if uptime > 0 else 0.0)
 
         if self._pipeline is not None:
             active_lines = self._pipeline.line_specs
@@ -94,6 +105,7 @@ class PipelineManager:
             uptime_seconds=round(uptime, 1),
             fps=round(fps, 1),
             demo_mode=self._config.demo_mode if self._config else False,
+            preroll_pct=self._preroll_pct if self.running else None,
             counting_lines=lines,
         )
 
@@ -115,8 +127,19 @@ class PipelineManager:
             if not config.counting_lines and self._default_lines:
                 config.counting_lines = list(self._default_lines)
 
+            # Determine whether buffer delay is needed: only for remote live network streams
+            src_str = str(config.source).lower()
+            is_remote_live = src_str.startswith(("http://", "https://", "rtsp://")) or ".m3u8" in src_str
+            self._eff_delay = self._stream_delay if is_remote_live else 0.0
+
+            self._delay_buffer.clear()
+            self._delay_start = time.time() if self._eff_delay > 0 else None
+            self._preroll_pct = 0 if self._eff_delay > 0 else None
+            self._counting_armed = self._eff_delay <= 0
+
             self._config = config
-            self._pipeline = Pipeline(config)
+            self._pipeline = Pipeline(config, counting_enabled=self._counting_armed)
+            self._pipeline.set_counting_enabled(self._counting_armed)
 
             # Load cumulative counts for today only for real cameras
             if not config.demo_mode:
@@ -127,12 +150,57 @@ class PipelineManager:
             self._start_time = time.time()
             self._last_sheets_sync_time = time.time()
             self._task = asyncio.create_task(self._run_loop(), name="pipeline")
+            if self._eff_delay > 0:
+                self._delay_task = asyncio.create_task(self._release_delay_loop(), name="timeshift-release")
+            else:
+                self._delay_task = None
+
+    async def _release_delay_loop(self) -> None:
+        """Time-driven timeshift releaser: emits each frame once it is
+        STREAM_DELAY_SECONDS old, independent of ingest hiccups. Also drives
+        the loading progress and arms counting at 100%."""
+        try:
+            while True:
+                await asyncio.sleep(0.04)
+                if self._eff_delay > 0:
+                    cutoff = time.time() - self._eff_delay
+                    while self._delay_buffer and self._delay_buffer[0][0] <= cutoff:
+                        _, ready = self._delay_buffer.popleft()
+                        for q in list(self._video_queues):
+                            if q.full():
+                                try:
+                                    q.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                            try:
+                                q.put_nowait(ready)
+                            except asyncio.QueueFull:
+                                pass
+                fill = (
+                    min(1.0, (time.time() - self._delay_start) / self._eff_delay)
+                    if self._eff_delay > 0 and self._delay_start else 1.0
+                )
+                self._preroll_pct = None if fill >= 1.0 else int(fill * 100)
+                if not self._counting_armed and fill >= 1.0:
+                    self._counting_armed = True
+                    self._start_time = time.time()  # Uptime starts when playback starts
+                    if self._pipeline:
+                        self._pipeline.set_counting_enabled(True)
+        except asyncio.CancelledError:
+            pass
 
     async def stop(self) -> None:
         async with self._lock:
             await self._stop_pipeline()
 
     async def _stop_pipeline(self) -> None:
+        if self._delay_task and not self._delay_task.done():
+            self._delay_task.cancel()
+            try:
+                await self._delay_task
+            except asyncio.CancelledError:
+                pass
+        self._delay_task = None
         if self._pipeline:
             self._pipeline.stop()
         if self._task and not self._task.done():
@@ -143,6 +211,7 @@ class PipelineManager:
                 pass
         self._task = None
         self._pipeline = None
+        self._delay_buffer.clear()
         # Mandatory autosave on disconnect/stop
         import api.events_db as events_db
         events_db.writer.flush()
@@ -207,44 +276,48 @@ class PipelineManager:
                 self._frame_index += 1
                 metrics = MetricsMessage.from_frame_metrics(raw_metrics)
 
-                # Persist confirmed counting crossings ONLY for real video (never demo)
-                if metrics.crossings and self._session_id and not (self._config and self._config.demo_mode):
-                    for c in metrics.crossings:
-                        events_db.writer.enqueue(events_db.make_event(
-                            camera_id=self._camera_id or "unknown",
-                            session_id=self._session_id,
-                            vehicle_type=c.class_name,
-                            timestamp_epoch=c.timestamp,
-                        ))
+                # Persist confirmed counting crossings ONLY for real video when armed (loading 100%)
+                if self._counting_armed:
+                    if metrics.crossings and self._session_id and not (self._config and self._config.demo_mode):
+                        for c in metrics.crossings:
+                            events_db.writer.enqueue(events_db.make_event(
+                                camera_id=self._camera_id or "unknown",
+                                session_id=self._session_id,
+                                vehicle_type=c.class_name,
+                                timestamp_epoch=c.timestamp,
+                            ))
 
-                # Persist to in-memory ring buffer (for live charts)
-                ring_push(metrics)
+                    # Persist to in-memory ring buffer (for live charts)
+                    ring_push(metrics)
 
-                # Upsert hourly aggregate periodically (every 1500 frames ~1 min) for non-demo
-                if not (self._config and self._config.demo_mode) and self._frame_index % 1500 == 0:
-                    asyncio.create_task(upsert_hourly(metrics))
+                    # Upsert hourly aggregate periodically (every 1500 frames ~1 min) for non-demo
+                    if not (self._config and self._config.demo_mode) and self._frame_index % 1500 == 0:
+                        asyncio.create_task(upsert_hourly(metrics))
 
-                # Periodic sync to Google Sheets (every 15 minutes = 900s) for non-demo
-                if not (self._config and self._config.demo_mode) and (time.time() - self._last_sheets_sync_time >= 900):
-                    self._last_sheets_sync_time = time.time()
-                    try:
-                        import api.sheets_sync as sheets_sync
-                        if sheets_sync.is_configured():
-                            asyncio.create_task(asyncio.to_thread(sheets_sync.sync_to_google_sheets))
-                    except Exception as e:
-                        print(f"[PipelineManager] Periodic sheets sync trigger error: {e}")
-
-                # Fan-out video frame
-                for q in list(self._video_queues):
-                    if q.full():
+                    # Periodic sync to Google Sheets (every 15 minutes = 900s) for non-demo
+                    if not (self._config and self._config.demo_mode) and (time.time() - self._last_sheets_sync_time >= 900):
+                        self._last_sheets_sync_time = time.time()
                         try:
-                            q.get_nowait()   # drop oldest frame
-                        except asyncio.QueueEmpty:
+                            import api.sheets_sync as sheets_sync
+                            if sheets_sync.is_configured():
+                                asyncio.create_task(asyncio.to_thread(sheets_sync.sync_to_google_sheets))
+                        except Exception as e:
+                            print(f"[PipelineManager] Periodic sheets sync trigger error: {e}")
+
+                # ── Frame delivery: direct for eff_delay <= 0, buffered for timeshift
+                if self._eff_delay <= 0:
+                    for q in list(self._video_queues):
+                        if q.full():
+                            try:
+                                q.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                        try:
+                            q.put_nowait(jpeg_bytes)
+                        except asyncio.QueueFull:
                             pass
-                    try:
-                        q.put_nowait(jpeg_bytes)
-                    except asyncio.QueueFull:
-                        pass
+                else:
+                    self._delay_buffer.append((time.time(), jpeg_bytes))
 
                 # Fan-out metrics
                 for q in list(self._metrics_queues):
@@ -265,9 +338,15 @@ class PipelineManager:
                 try:
                     import api.sheets_sync as sheets_sync
                     if sheets_sync.is_configured():
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            pool.submit(sheets_sync.sync_to_google_sheets).result(timeout=15.0)
+                        # Fire-and-forget thread — a blocking .result() here
+                        # would freeze the whole event loop (seen as HTTP 500)
+                        # whenever a session disconnects.
+                        import threading as _threading
+                        _threading.Thread(
+                            target=sheets_sync.sync_to_google_sheets,
+                            name="sheets-sync-onstop",
+                            daemon=True,
+                        ).start()
                 except Exception:
                     pass
 

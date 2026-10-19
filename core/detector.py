@@ -204,6 +204,13 @@ class Detector:
         if is_coco:
             coco_cols = list(COCO_TRAFFIC_CLASSES.keys())
             best_conf = cls_scores[:, coco_cols].max(axis=1)
+            # Specificity gate: the winning traffic class must also dominate ALL
+            # 80 COCO classes — a "person" or other object that happens to score
+            # on a vehicle column is rejected instead of mislabelled.
+            overall_best = cls_scores.max(axis=1)
+            best_conf = np.minimum(best_conf, np.where(
+                np.isin(np.argmax(cls_scores, axis=1), coco_cols), overall_best, 0.0
+            ))
         else:
             best_conf = cls_scores.max(axis=1)
         preds = preds[best_conf >= self.confidence_threshold]
@@ -220,6 +227,10 @@ class Detector:
                     if class_scores[coco_id] > best_conf:
                         best_conf = float(class_scores[coco_id])
                         best_cls = traffic_id
+                # Specificity: reject when another COCO class outscores the
+                # vehicle interpretation (kills phantom vehicles).
+                if float(class_scores.max()) > best_conf + 1e-9 and int(np.argmax(class_scores)) not in COCO_TRAFFIC_CLASSES:
+                    continue
                 confidence = best_conf
                 class_id = best_cls
             else:

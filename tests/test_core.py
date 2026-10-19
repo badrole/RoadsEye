@@ -85,10 +85,11 @@ class TestCountingLine:
         assert line.count_per_class["car"] == 1
 
     def test_no_false_crossing_same_side(self):
-        """Track stays on same side — no count."""
+        """Track stays on same side - no count."""
         line = CountingLine((0, 100), (1280, 100))
-        for y_top in [0, 20, 40, 60]:
-            track = make_track(1, 0, y_top, 100, y_top + 80)
+        # Boxes whose bottom edge never crosses y=100
+        for y_top in [0, 10, 20, 30]:
+            track = make_track(1, 0, y_top, 100, y_top + 60)
             line.update([track])
         assert line.total_count == 0
 

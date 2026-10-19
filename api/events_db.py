@@ -357,7 +357,7 @@ def _event_filters(
     session_id: str | None,
     date_from: str | None,
     date_to: str | None,
-) -> str:
+) -> tuple[str, list[Any]]:
     clauses, params = [], []
     if camera_id:
         clauses.append("camera_id = ?"); params.append(camera_id)

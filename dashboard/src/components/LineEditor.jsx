@@ -20,6 +20,7 @@ export default function LineEditor({ canvasRef }) {
 
   const dragRef = useRef(null)
   const frameRef = useRef({ w: 1280, h: 720 })
+  const [overlayTick, setOverlayTick] = useState(0)
 
   // ── Hydration ──────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
@@ -128,11 +129,22 @@ export default function LineEditor({ canvasRef }) {
   // ── Pointer events ─────────────────────────────────────────────────────────
   const onPointerDown = useCallback((e) => {
     if (!editing) return
+    // Force-sync overlay dimensions from the video canvas BEFORE computing
+    // coordinates — the 500 ms interval may not have fired yet on first drag.
+    const c = canvasRef?.current
+    if (c && c.width > 0) {
+      frameRef.current = { w: c.width, h: c.height }
+      const ov = overlayRef.current
+      if (ov && (ov.width !== c.width || ov.height !== c.height)) {
+        ov.width = c.width
+        ov.height = c.height
+      }
+    }
     const { fx, fy, rect } = toFrame(e)
     const hit = hitTest(fx, fy, rect)
-    overlayRef.current?.setPointerCapture?.(e.pointerId)
 
     if (hit) {
+      overlayRef.current?.setPointerCapture?.(e.pointerId)
       setSelectedIdx(hit.idx)
       const l = lines.counting[hit.idx]
       dragRef.current = {
@@ -146,7 +158,7 @@ export default function LineEditor({ canvasRef }) {
       setSelectedIdx(null)
       dragRef.current = null
     }
-  }, [editing, toFrame, hitTest, lines])
+  }, [editing, canvasRef, toFrame, hitTest, lines])
 
   const onPointerMove = useCallback((e) => {
     const drag = dragRef.current
@@ -192,12 +204,21 @@ export default function LineEditor({ canvasRef }) {
 
   // ── Sync frame dimensions with canvas ──────────────────────────────────────
   useEffect(() => {
-    const id = setInterval(() => {
+    // Overlay bitmap must match the video bitmap exactly, and re-run when the
+    // stream resolution changes (resolution shift = element resize too).
+    const cv = overlayRef.current
+    if (!cv) return
+    const apply = () => {
       const c = canvasRef?.current
       if (c && c.width > 0 && (c.width !== frameRef.current.w || c.height !== frameRef.current.h)) {
         frameRef.current = { w: c.width, h: c.height }
+        if (cv.width !== frameRef.current.w) cv.width = frameRef.current.w
+        if (cv.height !== frameRef.current.h) cv.height = frameRef.current.h
+        setOverlayTick((t) => t + 1)   // repaint overlay in the new scale
       }
-    }, 1000)
+    }
+    apply()
+    const id = setInterval(apply, 200)
     return () => clearInterval(id)
   }, [canvasRef])
 
@@ -206,10 +227,10 @@ export default function LineEditor({ canvasRef }) {
     const cv = overlayRef.current
     if (!cv) return
     const fr = frameRef.current
-    cv.width = fr.w
-    cv.height = fr.h
+    if (cv.width !== fr.w) cv.width = fr.w
+    if (cv.height !== fr.h) cv.height = fr.h
     const ctx = cv.getContext('2d')
-    ctx.clearRect(0, 0, fr.w, fr.h)
+    ctx.clearRect(0, 0, cv.width, cv.height)
     if (!editing) return
 
     lines.counting.forEach((l, i) => {
@@ -268,7 +289,7 @@ export default function LineEditor({ canvasRef }) {
       ctx.fillStyle = color
       ctx.fillText(label, midX - textWidth / 2, midY - 7)
     })
-  }, [editing, lines, selectedIdx])
+  }, [editing, lines, selectedIdx, overlayTick])
 
   return (
     <>
@@ -325,7 +346,6 @@ export default function LineEditor({ canvasRef }) {
           dragRef.current = null
         }}
         className={`absolute inset-0 w-full h-full ${editing ? 'cursor-crosshair' : 'pointer-events-none'}`}
-        style={{ minHeight: 360 }}
       />
     </>
   )

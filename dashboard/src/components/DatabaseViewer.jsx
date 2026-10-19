@@ -50,6 +50,10 @@ function shortDate(ymd) {
   return `${d} ${_MONTHS_SHORT[m - 1]}`
 }
 
+function getWibDate(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' }).format(date)
+}
+
 
 
 export default function DatabaseViewer({ onClose }) {
@@ -137,20 +141,20 @@ export default function DatabaseViewer({ onClose }) {
   // ── Date Presets ───────────────────────────────────────────────────────────
   const applyPreset = (preset) => {
     setActivePreset(preset)
-    const today = new Date().toISOString().slice(0, 10)
+    const today = getWibDate()
     if (preset === 'today') {
       setDateFrom(today)
       setDateTo(today)
     } else if (preset === 'yesterday') {
       const d = new Date()
       d.setDate(d.getDate() - 1)
-      const yday = d.toISOString().slice(0, 10)
+      const yday = getWibDate(d)
       setDateFrom(yday)
       setDateTo(yday)
     } else if (preset === '7days') {
       const d = new Date()
       d.setDate(d.getDate() - 7)
-      setDateFrom(d.toISOString().slice(0, 10))
+      setDateFrom(getWibDate(d))
       setDateTo(today)
     } else {
       setDateFrom('')
@@ -170,7 +174,7 @@ export default function DatabaseViewer({ onClose }) {
       // Direct download trigger from streaming endpoint
       const link = document.createElement('a')
       link.href = `${API}/analytics/events/export.csv?${qs}`
-      link.setAttribute('download', `roadseye_traffic_${new Date().toISOString().slice(0, 10)}.csv`)
+      link.setAttribute('download', `roadseye_traffic_${getWibDate()}.csv`)
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)

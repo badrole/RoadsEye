@@ -23,7 +23,7 @@ class Track:
     class_name: str = field(init=False)
 
     def __post_init__(self) -> None:
-        self.class_name = CLASS_NAMES[self.class_id] if self.class_id < len(CLASS_NAMES) else "unknown"
+        self.class_name = CLASS_NAMES[self.class_id] if 0 <= self.class_id < len(CLASS_NAMES) else "unknown"
 
     @property
     def center(self) -> tuple[float, float]:
