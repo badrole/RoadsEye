@@ -363,8 +363,12 @@ class Pipeline:
         metrics  = self._analytics.update(tracks)
         if metrics.crossings:
             for c in metrics.crossings:
-                self._line_flash[c.line_name] = 8
-                self._crossed_flash[c.track_id] = 10
+                lname = c.get("line_name") if isinstance(c, dict) else getattr(c, "line_name", None)
+                tid = c.get("track_id") if isinstance(c, dict) else getattr(c, "track_id", None)
+                if lname:
+                    self._line_flash[lname] = 8
+                if tid is not None:
+                    self._crossed_flash[tid] = 10
         annotated = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
 
@@ -376,8 +380,12 @@ class Pipeline:
         metrics    = self._analytics.update(tracks)
         if metrics.crossings:
             for c in metrics.crossings:
-                self._line_flash[c.line_name] = 8
-                self._crossed_flash[c.track_id] = 10
+                lname = c.get("line_name") if isinstance(c, dict) else getattr(c, "line_name", None)
+                tid = c.get("track_id") if isinstance(c, dict) else getattr(c, "track_id", None)
+                if lname:
+                    self._line_flash[lname] = 8
+                if tid is not None:
+                    self._crossed_flash[tid] = 10
         annotated  = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
 

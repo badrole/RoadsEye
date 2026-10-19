@@ -11,9 +11,6 @@ import { useState } from 'react'
 
 const API = '/api'
 
-// Default counting line for demo mode: vertical centre line on a 1280×720 frame
-const DEMO_LINE = { name: 'main', x1: 640, y1: 252, x2: 640, y2: 612 }
-
 export default function PipelineControl({ status, onStatusChange, vertical = false }) {
   const [source,    setSource]    = useState('0')
   const [conf,      setConf]      = useState('35')   // percent (0-100)
@@ -22,9 +19,6 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
   const [open,      setOpen]      = useState(vertical ? false : true)   // rail: collapsed by default
 
   const isRunning = status?.running ?? false
-
-  // Counting lines are edited by dragging endpoints on the video canvas
-  // (LineEditor). Backend keeps them across starts when none are sent.
 
   async function startPipeline(src, linesCfg) {
     setLoading(true)
@@ -54,10 +48,6 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
   async function handleStart(e) {
     e.preventDefault()
     await startPipeline(source, [])
-  }
-
-  async function handleDemo() {
-    await startPipeline('demo', [DEMO_LINE])
   }
 
   async function handleStop() {
@@ -127,32 +117,21 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
 
         {/* Start / Stop buttons */}
         {!isRunning ? (
-          <div className="flex gap-2">
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 px-4 py-2 rounded-sm bg-lane hover:bg-lane-bright text-asphalt font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors shadow-glowlane"
-            >
-              {loading ? 'Starting…' : 'START'}
-            </button>
-            <button
-              type="button"
-              onClick={handleDemo}
-              disabled={loading}
-              className="flex-1 px-4 py-2 rounded-sm border border-lane-dim/60 hover:border-lane hover:text-lane text-pip font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors"
-              title="Run synthetic demo — no ONNX model or camera required"
-            >
-              DEMO
-            </button>
-          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full px-4 py-2 rounded-sm bg-lane hover:bg-lane-bright text-asphalt font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors shadow-glowlane"
+          >
+            {loading ? 'Starting…' : 'START PIPELINE'}
+          </button>
         ) : (
           <button
             type="button"
             onClick={handleStop}
             disabled={loading}
-            className="px-4 py-2 rounded-sm bg-stop hover:bg-red-500 text-white font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors"
+            className="w-full px-4 py-2 rounded-sm bg-stop hover:bg-red-500 text-white font-code text-sm font-bold tracking-wider disabled:opacity-50 transition-colors"
           >
-            {loading ? 'Stopping…' : 'STOP'}
+            {loading ? 'Stopping…' : 'STOP PIPELINE'}
           </button>
         )}
       </form>
@@ -162,7 +141,7 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
       {status && (
         <p className="mt-2 font-code text-[10px] text-pip leading-relaxed break-all">
           {isRunning
-            ? `${status.demo_mode ? '[DEMO] ' : ''}RUNNING · frame ${status.frame_index} · ${status.fps} fps · ${String(status.source).slice(0, 46)}…`
+            ? `RUNNING · frame ${status.frame_index} · ${status.fps} fps · ${String(status.source).slice(0, 46)}…`
             : 'Pipeline stopped'}
         </p>
       )}

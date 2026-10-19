@@ -116,6 +116,8 @@ async def ws_video(ws: WebSocket) -> None:
         pass
     finally:
         manager.unsubscribe_video(q)
+        import api.events_db as events_db
+        events_db.writer.flush()
 
 
 # ── WebSocket: metrics stream ─────────────────────────────────────────────────
@@ -152,3 +154,5 @@ async def ws_metrics(ws: WebSocket) -> None:
         pass
     finally:
         manager.unsubscribe_metrics(q)
+        import api.events_db as events_db
+        events_db.writer.flush()

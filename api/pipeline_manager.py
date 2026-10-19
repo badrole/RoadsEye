@@ -104,7 +104,7 @@ class PipelineManager:
             frame_index=self._frame_index,
             uptime_seconds=round(uptime, 1),
             fps=round(fps, 1),
-            demo_mode=self._config.demo_mode if self._config else False,
+            demo_mode=False,
             preroll_pct=self._preroll_pct if self.running else None,
             counting_lines=lines,
         )
@@ -114,15 +114,11 @@ class PipelineManager:
             if self.running:
                 await self._stop_pipeline()
 
-            # Persistent session is only opened for real cameras/files, never for demo
-            if not config.demo_mode:
-                self._session_id = uuid.uuid4().hex
-                self._camera_id = str(config.source)
-                import api.events_db as events_db
-                events_db.open_session(self._session_id, self._camera_id, source_detail="RoadsEye pipeline")
-            else:
-                self._session_id = None
-                self._camera_id = "demo"
+            # Always open a persistent session for database logging
+            self._session_id = uuid.uuid4().hex
+            self._camera_id = str(config.source)
+            import api.events_db as events_db
+            events_db.open_session(self._session_id, self._camera_id, source_detail="RoadsEye pipeline")
 
             if not config.counting_lines and self._default_lines:
                 config.counting_lines = list(self._default_lines)
@@ -141,10 +137,9 @@ class PipelineManager:
             self._pipeline = Pipeline(config, counting_enabled=self._counting_armed)
             self._pipeline.set_counting_enabled(self._counting_armed)
 
-            # Load cumulative counts for today only for real cameras
-            if not config.demo_mode:
-                today_counts = events_db.get_today_counts(camera_id=self._camera_id)
-                self._pipeline.set_today_baseline(today_counts)
+            # Load cumulative counts for today to maintain continuous tally across reconnects/reloads
+            today_counts = events_db.get_today_counts(camera_id=self._camera_id)
+            self._pipeline.set_today_baseline(today_counts)
 
             self._frame_index = 0
             self._start_time = time.time()
@@ -276,27 +271,32 @@ class PipelineManager:
                 self._frame_index += 1
                 metrics = MetricsMessage.from_frame_metrics(raw_metrics)
 
-                # Persist confirmed counting crossings ONLY for real video when armed (loading 100%)
+                # Persist confirmed counting crossings when armed (loading 100%)
                 if self._counting_armed:
-                    if metrics.crossings and self._session_id and not (self._config and self._config.demo_mode):
+                    if metrics.crossings and self._session_id:
                         for c in metrics.crossings:
                             events_db.writer.enqueue(events_db.make_event(
                                 camera_id=self._camera_id or "unknown",
                                 session_id=self._session_id,
                                 vehicle_type=c.class_name,
                                 timestamp_epoch=c.timestamp,
+                                track_id=c.track_id,
+                                confidence=c.confidence,
+                                direction=c.direction,
+                                counting_line_id=c.line_name,
                             ))
 
                     # Persist to in-memory ring buffer (for live charts)
                     ring_push(metrics)
 
-                    # Upsert hourly aggregate periodically (every 1500 frames ~1 min) for non-demo
-                    if not (self._config and self._config.demo_mode) and self._frame_index % 1500 == 0:
+                    # Upsert hourly aggregate periodically (every 1500 frames ~1 min)
+                    if self._frame_index % 1500 == 0:
                         asyncio.create_task(upsert_hourly(metrics))
 
-                    # Periodic sync to Google Sheets (every 15 minutes = 900s) for non-demo
-                    if not (self._config and self._config.demo_mode) and (time.time() - self._last_sheets_sync_time >= 900):
+                    # Periodic auto backup to Google Sheets (every 15 minutes = 900s)
+                    if time.time() - self._last_sheets_sync_time >= 900:
                         self._last_sheets_sync_time = time.time()
+                        events_db.writer.flush()
                         try:
                             import api.sheets_sync as sheets_sync
                             if sheets_sync.is_configured():

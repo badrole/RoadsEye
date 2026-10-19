@@ -235,7 +235,7 @@ class EventWriter:
     flush() is called explicitly on disconnect/stop.
     """
 
-    AUTOSAVE_INTERVAL_SECONDS = 900.0   # 15 menit
+    AUTOSAVE_INTERVAL_SECONDS = 1.0   # 1 second auto-persist to SQLite
 
     def __init__(self) -> None:
         self._buffer: list[dict] = []
@@ -254,14 +254,19 @@ class EventWriter:
         self._thread.start()
 
     def enqueue(self, record: dict[str, Any] | None) -> None:
-        """Enqueue an event in memory — purely non-blocking, zero disk I/O."""
+        """Enqueue an event in memory and persist promptly to disk."""
         if record is None:
             return
+        should_flush = False
         with self._lock:
             if len(self._buffer) >= _QUEUE_MAX:
                 self.dropped += 1
             else:
                 self._buffer.append(record)
+                if len(self._buffer) >= 5:
+                    should_flush = True
+        if should_flush:
+            self.flush()
 
     def flush(self) -> int:
         """Mandatory flush of buffered events to SQLite (autosave & disconnect)."""
