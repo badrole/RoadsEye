@@ -77,14 +77,6 @@ npm run dev
 
 Open `http://localhost:3000`, enter a video source (`0` for webcam, a local `.mp4` path, an `rtsp://` or `.m3u8` URL, or `demo`), choose `Per Line` or `Per ID`, and click **START PIPELINE**.
 
-### Docker
-
-```bash
-docker compose up --build
-# Dashboard : http://localhost:80
-# API docs  : http://localhost:8000/docs
-```
-
 ---
 
 ## Configuration
@@ -186,7 +178,6 @@ RoadsEye/
 ├── tests/                    test_core.py, test_api.py, test_events.py, test_sheets.py
 ├── start_app.bat             Windows one-click launcher
 ├── stop_app.bat              Windows service stopper
-├── docker-compose.yml        Docker deployment config
 └── requirements.txt          Python dependencies
 ```
 
