@@ -6,7 +6,7 @@ in core/ so the API contract is explicit and independently versioned.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -33,7 +33,7 @@ class CrossingData(BaseModel):
     class_name: str
     class_id: int
     confidence: float
-    direction: str          # "positive" | "negative" — side change across the line
+    direction: str          # "positive" | "negative" | "id"
     timestamp: float
 
 
@@ -99,14 +99,19 @@ class PipelineStartRequest(BaseModel):
         default=0,
         description="Video file path, webcam index, RTSP URL, or 'demo'",
     )
-    confidence_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    confidence_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     skip_frames: int = Field(default=0, ge=0)
     counting_lines: list[CountingLineConfig] = Field(default_factory=list)
     pixels_per_meter: float = Field(default=10.0, gt=0)
     loop: bool = False
     draw_annotations: bool = True
-    jpeg_quality: int = Field(default=80, ge=1, le=100)
+    jpeg_quality: int = Field(default=72, ge=1, le=100)
+    count_mode: Literal["line", "id"] | None = Field(
+        default=None,
+        description="'line' = count tripwire crossings, 'id' = count every tracked vehicle ID once. "
+                    "Omit to keep the server's current mode.",
+    )
 
     @field_validator("source", mode="before")
     @classmethod
@@ -235,7 +240,17 @@ class PipelineStatus(BaseModel):
     fps: float = 0.0
     demo_mode: bool = False
     preroll_pct: int | None = None   # 0-99 while the pre-roll buffer downloads
+    count_mode: Literal["line", "id"] = "line"
     counting_lines: list[CountingLineStatus] = Field(default_factory=list)
+
+
+class CountModeRequest(BaseModel):
+    """POST /pipeline/count-mode — switch counting method live."""
+    mode: Literal["line", "id"]
+
+
+class CountModeResponse(BaseModel):
+    mode: Literal["line", "id"]
 
 
 class LinesUpdateRequest(BaseModel):

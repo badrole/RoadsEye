@@ -3,7 +3,7 @@
  * Donut counts are filtered to TODAY (WIB) and reset to 0 at each midnight
  * rollover; historical totals live in the Database viewer window.
  */
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, memo } from 'react'
 import {
   PieChart,
   Pie,
@@ -67,7 +67,6 @@ const renderActiveShape = (props) => {
 
   return (
     <g>
-      {/* Expanded outer ring */}
       <Sector
         cx={cx}
         cy={cy}
@@ -78,7 +77,6 @@ const renderActiveShape = (props) => {
         fill={fill}
         style={{ filter: 'drop-shadow(0px 0px 6px rgba(255, 209, 0, 0.4))' }}
       />
-      {/* Inner highlight ring */}
       <Sector
         cx={cx}
         cy={cy}
@@ -92,10 +90,7 @@ const renderActiveShape = (props) => {
   )
 }
 
-export default function HistoryPanel({ refreshKey }) {
-  // Reporting day = TODAY (WIB). Every re-render recomputes it, so the first
-  // refresh after midnight (<=30s, driven by refreshKey) naturally resets the
-  // filter to the new day and today's counters read 0 again.
+function HistoryPanel({ refreshKey }) {
   const todayKey = wibDateNdaysAgo(0)
   const [summary, setSummary] = useState(null)
   const [activeIndex, setActiveIndex] = useState(null)
@@ -120,7 +115,6 @@ export default function HistoryPanel({ refreshKey }) {
     window.open('?view=database', '_blank', 'width=1280,height=820,menubar=no,toolbar=no')
   }
 
-  // Prepare circular donut data from today's summary
   const rawClassCounts = summary?.count_per_class ?? {}
   const donutData = Object.entries(rawClassCounts).map(([name, value]) => ({
     name,
@@ -265,3 +259,5 @@ export default function HistoryPanel({ refreshKey }) {
     </div>
   )
 }
+
+export default memo(HistoryPanel)

@@ -1,14 +1,6 @@
 /**
  * DatabaseViewer — Dedicated web interface for browsing, filtering, and exporting
  * persisted traffic records from SQLite.
- *
- * Implements /ui-ux-pro-max guidelines:
- * - High-contrast CCTV dark theme (asphalt, lane yellow, hazard orange).
- * - Minimum 44px accessible touch targets.
- * - Monospace accents for timestamps and IDs.
- * - Robust filtering (class, date range, session).
- * - Real-time statistics cards.
- * - Instant CSV export & WAL database backup.
  */
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import HistoryCalendar from './HistoryCalendar'
@@ -53,8 +45,6 @@ function shortDate(ymd) {
 function getWibDate(date = new Date()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' }).format(date)
 }
-
-
 
 export default function DatabaseViewer({ onClose }) {
   const [events, setEvents] = useState({ total: 0, items: [] })
@@ -119,7 +109,6 @@ export default function DatabaseViewer({ onClose }) {
     loadEvents()
   }, [loadSummary, loadEvents])
 
-  /* Unfiltered per-day totals: calendar + today/yesterday chips */
   const loadAllDaily = useCallback(async () => {
     try {
       const res = await fetch(`${API}/analytics/history/summary`)
@@ -133,7 +122,6 @@ export default function DatabaseViewer({ onClose }) {
     loadAllDaily()
   }, [loadAllDaily])
 
-  // Filter change resets page to 1
   useEffect(() => {
     setPage(1)
   }, [vehicleType, dateFrom, dateTo, pageSize])
@@ -171,7 +159,6 @@ export default function DatabaseViewer({ onClose }) {
       if (dateFrom) qs.set('date_from', dateFrom)
       if (dateTo) qs.set('date_to', dateTo)
 
-      // Direct download trigger from streaming endpoint
       const link = document.createElement('a')
       link.href = `${API}/analytics/events/export.csv?${qs}`
       link.setAttribute('download', `roadseye_traffic_${getWibDate()}.csv`)
@@ -188,14 +175,12 @@ export default function DatabaseViewer({ onClose }) {
     }
   }
 
-  // ── Clicked calendar day → filter the table to that single date ──────────
   const applyDayFilter = (date) => {
     setDateFrom(date)
     setDateTo(date)
     setActivePreset('custom')
   }
 
-  // ── Delete the selected calendar day's history (DB + Google Sheet) ────────
   const deleteDayHistory = async () => {
     if (!dateFrom) return
     const ok = window.confirm(
@@ -225,8 +210,6 @@ export default function DatabaseViewer({ onClose }) {
     }
   }
 
-  // Peak + data span are computed per DAY (Asia/Jakarta), never all-time:
-  // single-date filter → that exact day; range → the busiest day inside it.
   const peakDay = useMemo(() => {
     const list = summary?.daily ?? []
     if (!list.length) return null
@@ -238,7 +221,6 @@ export default function DatabaseViewer({ onClose }) {
 
   const totalPages = Math.max(1, Math.ceil(events.total / pageSize))
 
-  // Find dominant class
   let dominantClass = '—'
   let dominantCount = 0
   if (summary?.count_per_class) {
@@ -316,7 +298,6 @@ export default function DatabaseViewer({ onClose }) {
 
         {/* ── KPI Summary Cards ────────────────────────────────────────────── */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {/* Card 1: Total Records */}
           <div className="p-4 rounded-xl bg-[#121929]/80 border border-[#243048] backdrop-blur relative overflow-hidden group hover:border-lane/40 transition-colors">
             <div className="flex items-center justify-between">
               <span className="font-code text-xs text-pip uppercase tracking-wider">Total Recorded</span>
@@ -331,8 +312,6 @@ export default function DatabaseViewer({ onClose }) {
             </div>
           </div>
 
-          {/* Card 2: Uptime — recording start → stop (per selected day), with
-              the per-day peak hour + recorded volume on the line BELOW it */}
           <div className="p-4 rounded-xl bg-[#121929]/80 border border-[#243048] backdrop-blur relative overflow-hidden group hover:border-lane/40 transition-colors">
             <div className="flex items-center justify-between">
               <span className="font-code text-xs text-pip uppercase tracking-wider">Uptime</span>
@@ -357,7 +336,6 @@ export default function DatabaseViewer({ onClose }) {
             </p>
           </div>
 
-          {/* Card 3: Dominant Class */}
           <div className="p-4 rounded-xl bg-[#121929]/80 border border-[#243048] backdrop-blur relative overflow-hidden group hover:border-lane/40 transition-colors">
             <div className="flex items-center justify-between">
               <span className="font-code text-xs text-pip uppercase tracking-wider">Dominant Class</span>
@@ -391,7 +369,6 @@ export default function DatabaseViewer({ onClose }) {
             />
           </div>
 
-          {/* Busiest days inside the current filter range, newest first */}
           <div className="p-4 rounded-xl bg-[#121929]/80 border border-[#243048] flex flex-col shadow-lg">
             <h2 className="font-code text-xs text-pip uppercase tracking-wider flex items-center gap-2 pb-2 border-b border-[#243048]">
               <span className="w-1.5 h-1.5 rounded-full bg-lane" />
@@ -422,7 +399,6 @@ export default function DatabaseViewer({ onClose }) {
 
         {/* ── Filter & Search Bar ──────────────────────────────────────────── */}
         <div className="p-4 rounded-xl bg-[#121929]/80 border border-[#243048] flex flex-wrap items-center gap-3 shadow-lg">
-          {/* Preset Buttons */}
           <div className="flex items-center gap-1 bg-[#090d16] p-1 rounded-lg border border-[#243048]">
             {[
               { id: 'all', label: 'All Time' },
@@ -446,7 +422,6 @@ export default function DatabaseViewer({ onClose }) {
 
           <div className="h-6 w-px bg-[#243048] hidden lg:block" />
 
-          {/* Vehicle Type Filter */}
           <div className="flex items-center gap-1.5">
             <label className="font-code text-xs text-pip">Class:</label>
             <select
@@ -465,7 +440,6 @@ export default function DatabaseViewer({ onClose }) {
             </select>
           </div>
 
-          {/* Date Range Inputs */}
           <div className="flex items-center gap-2">
             <span className="font-code text-xs text-pip">Range:</span>
             <input
@@ -489,9 +463,6 @@ export default function DatabaseViewer({ onClose }) {
             />
           </div>
 
-          {/* Delete a selected day directly from the calendar */}
-
-          {/* Refresh / Reset */}
           <button
             onClick={() => {
               loadSummary()
@@ -510,7 +481,6 @@ export default function DatabaseViewer({ onClose }) {
 
         {/* ── Data Table Section ───────────────────────────────────────────── */}
         <div className="rounded-xl bg-[#121929]/80 border border-[#243048] overflow-hidden shadow-xl flex flex-col">
-          {/* Table Header Bar */}
           <div className="px-5 py-3.5 border-b border-[#243048] flex items-center justify-between bg-[#0e1422]">
             <div className="font-code text-xs text-pip flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-lane" />
@@ -532,7 +502,6 @@ export default function DatabaseViewer({ onClose }) {
             </div>
           </div>
 
-          {/* Table Body */}
           <div className="overflow-x-auto min-h-[360px]">
             {loading ? (
               <div className="flex flex-col items-center justify-center h-72 gap-3 text-pip">
@@ -557,8 +526,10 @@ export default function DatabaseViewer({ onClose }) {
                 <thead>
                   <tr className="bg-[#0e1422] text-pip uppercase tracking-wider text-[11px] border-b border-[#243048]">
                     <th className="py-3 px-4 w-16">#</th>
-                    <th className="py-3 px-4">Crossing Time (WIB)</th>
+                    <th className="py-3 px-4">Time (WIB)</th>
+                    <th className="py-3 px-4">Vehicle ID</th>
                     <th className="py-3 px-4">Vehicle Classification</th>
+                    <th className="py-3 px-4">Mode / Line</th>
                     <th className="py-3 px-4 text-center w-28">Status</th>
                   </tr>
                 </thead>
@@ -582,6 +553,11 @@ export default function DatabaseViewer({ onClose }) {
                           {formatWib(it.timestamp_utc)}
                         </td>
                         <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded bg-[#090d16] border border-[#243048] text-lane font-bold">
+                            {it.track_id != null ? `#${it.track_id}` : '—'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
                           <span
                             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold capitalize"
                             style={{
@@ -592,6 +568,11 @@ export default function DatabaseViewer({ onClose }) {
                           >
                             <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: cfg.color }} />
                             {cfg.label}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded text-[11px] uppercase bg-[#0e1422] border border-[#243048] text-chalk">
+                            {it.counting_line_id === 'ID' ? 'PER ID' : (it.counting_line_id || 'line1')}
                           </span>
                         </td>
                         <td className="py-3 px-4 text-center">
@@ -607,7 +588,6 @@ export default function DatabaseViewer({ onClose }) {
             )}
           </div>
 
-          {/* ── Pagination Footer ────────────────────────────────────────── */}
           <div className="px-5 py-3.5 border-t border-[#243048] flex flex-wrap items-center justify-between gap-4 bg-[#0e1422]">
             <div className="font-code text-xs text-pip">
               Page <span className="text-chalk font-bold">{page}</span> of{' '}

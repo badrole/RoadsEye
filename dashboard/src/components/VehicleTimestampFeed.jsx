@@ -1,6 +1,6 @@
 /**
- * VehicleTimestampFeed — displays real-time timestamps of vehicles crossing the detection line.
- * Replaces the old anomaly alerts panel with a clean live timestamp event feed.
+ * VehicleTimestampFeed — displays real-time timestamps, tracker IDs (#id),
+ * vehicle types, and counting mode (Per ID or Per Line) of counted vehicles.
  */
 import { useState, useEffect, useRef } from 'react'
 
@@ -42,7 +42,7 @@ function formatWibTimestamp(epochSec) {
   }
 }
 
-export default function VehicleTimestampFeed({ latest }) {
+export default function VehicleTimestampFeed({ latest, countMode = 'line' }) {
   const [feed, setFeed] = useState([])
   const containerRef = useRef(null)
 
@@ -55,12 +55,12 @@ export default function VehicleTimestampFeed({ latest }) {
           timestamp: c.timestamp,
           class_name: c.class_name || 'vehicle',
           track_id: c.track_id,
+          line_name: c.line_name || (countMode === 'id' ? 'ID' : 'line1'),
         }))
-        // Prepend newest items, keep max 50
         return [...newItems, ...prev].slice(0, 50)
       })
     }
-  }, [latest?.crossings])
+  }, [latest?.crossings, countMode])
 
   return (
     <div className="panel relative p-4 flex flex-col overflow-hidden">
@@ -82,7 +82,11 @@ export default function VehicleTimestampFeed({ latest }) {
         {feed.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-pip font-code text-xs">
             <span className="w-6 h-6 border-2 border-lane-dim border-t-lane rounded-full animate-spin mb-2" />
-            <span className="tracking-widest uppercase">Waiting for vehicles to cross counting line...</span>
+            <span className="tracking-widest uppercase">
+              {countMode === 'id'
+                ? 'Waiting for vehicles in frame (Per ID mode)...'
+                : 'Waiting for vehicles to cross counting line...'}
+            </span>
           </div>
         ) : (
           feed.map((item, idx) => {
@@ -104,15 +108,21 @@ export default function VehicleTimestampFeed({ latest }) {
                     className="w-2.5 h-2.5 rounded-sm shrink-0"
                     style={{ backgroundColor: color }}
                   />
-                  <div>
-                    <div className="font-code text-xs font-semibold flex items-center gap-2">
-                      <span className="capitalize">{label}</span>
-                      {isLatest && (
-                        <span className="text-[10px] bg-go/20 text-go px-1.5 py-0.2 rounded border border-go/40">
-                          NEW
-                        </span>
-                      )}
-                    </div>
+                  <div className="font-code text-xs font-semibold flex items-center gap-2">
+                    {item.track_id != null && (
+                      <span className="text-[11px] font-bold text-lane bg-asphalt-deep border border-lane-dim/50 px-1.5 py-0.5 rounded">
+                        #{item.track_id}
+                      </span>
+                    )}
+                    <span className="capitalize">{label}</span>
+                    <span className="text-[10px] text-pip border border-lane-dim/30 px-1.5 py-0.5 rounded uppercase">
+                      {item.line_name}
+                    </span>
+                    {isLatest && (
+                      <span className="text-[10px] bg-go/20 text-go px-1.5 py-0.2 rounded border border-go/40">
+                        NEW
+                      </span>
+                    )}
                   </div>
                 </div>
 

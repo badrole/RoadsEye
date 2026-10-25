@@ -2,7 +2,7 @@
  * ClassBreakdown — interactive round donut chart with high-contrast tooltip
  * and center statistics indicator.
  */
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { PieChart, Pie, Cell, ResponsiveContainer, Sector } from 'recharts'
 
 const CLASS_COLORS = {
@@ -25,12 +25,11 @@ const FALLBACK_COLORS = ['#22d3ee', '#A78BFA', '#34d399', '#F472B6']
 const renderActiveShape = (props) => {
   const {
     cx, cy, innerRadius, outerRadius, startAngle, endAngle,
-    fill, payload, value
+    fill,
   } = props
 
   return (
     <g>
-      {/* Expanded outer ring */}
       <Sector
         cx={cx}
         cy={cy}
@@ -41,7 +40,6 @@ const renderActiveShape = (props) => {
         fill={fill}
         style={{ filter: 'drop-shadow(0px 0px 6px rgba(255, 209, 0, 0.4))' }}
       />
-      {/* Inner highlight ring */}
       <Sector
         cx={cx}
         cy={cy}
@@ -55,7 +53,7 @@ const renderActiveShape = (props) => {
   )
 }
 
-export default function ClassBreakdown({ latest }) {
+function ClassBreakdown({ latest }) {
   const [activeIndex, setActiveIndex] = useState(null)
 
   const raw   = latest?.count_per_class ?? {}
@@ -210,3 +208,14 @@ export default function ClassBreakdown({ latest }) {
     </div>
   )
 }
+
+export default memo(ClassBreakdown, (prev, next) => {
+  const a = prev.latest?.count_per_class
+  const b = next.latest?.count_per_class
+  if (a === b) return true
+  if (!a || !b) return false
+  const keysA = Object.keys(a)
+  const keysB = Object.keys(b)
+  if (keysA.length !== keysB.length) return false
+  return keysA.every(k => a[k] === b[k])
+})

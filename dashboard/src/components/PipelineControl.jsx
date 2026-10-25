@@ -1,24 +1,44 @@
 /**
- * PipelineControl — start / stop pipeline form.
+ * PipelineControl — start / stop pipeline form & counting mode selector.
  *
  * Features:
- *   - Free-form source input (webcam index, file path, RTSP URL)
- *   - "Demo" quick-start button — synthetic scene, no model needed
- *   - Optional counting line configuration (up to 3 named lines)
+ *   - Free-form source input (webcam index, file path, RTSP/HLS URL)
+ *   - 2-option Counting Mode: Per Line vs Per ID (can be switched before or during run)
  *   - Confidence threshold
  */
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 const API = '/api'
 
 export default function PipelineControl({ status, onStatusChange, vertical = false }) {
   const [source,    setSource]    = useState('0')
-  const [conf,      setConf]      = useState('35')   // percent (0-100)
+  const [conf,      setConf]      = useState('25')   // percent (0-100)
+  const [countMode, setCountMode] = useState(status?.count_mode || 'line')
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState(null)
-  const [open,      setOpen]      = useState(vertical ? false : true)   // rail: collapsed by default
+  const [open,      setOpen]      = useState(vertical ? false : true)
 
   const isRunning = status?.running ?? false
+
+  useEffect(() => {
+    if (status?.count_mode) {
+      setCountMode(status.count_mode)
+    }
+  }, [status?.count_mode])
+
+  async function handleModeChange(nextMode) {
+    setCountMode(nextMode)
+    try {
+      await fetch(`${API}/pipeline/count-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: nextMode }),
+      })
+      onStatusChange?.()
+    } catch {
+      /* applied on next start if offline */
+    }
+  }
 
   async function startPipeline(src, linesCfg) {
     setLoading(true)
@@ -31,6 +51,7 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
           source: src,
           confidence_threshold: parseFloat(conf) / 100,
           counting_lines: linesCfg,
+          count_mode: countMode,
         }),
       })
       if (!res.ok) {
@@ -63,8 +84,6 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
     }
   }
 
-  // ── render ────────────────────────────────────────────────────────────────
-
   return (
     <div className="bg-asphalt-panel border border-lane-dim/40 rounded-sm">
       {/* Collapse header */}
@@ -88,11 +107,47 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
           <label className="font-code text-[10px] uppercase tracking-[0.2em] text-pip">Source</label>
           <input
             className="bg-asphalt-deep border border-lane-dim/50 rounded-sm px-3 py-2 text-sm font-code text-chalk w-full focus:outline-none focus:border-lane transition-colors placeholder:text-pip/60"
-            placeholder="0 / file / rtsp://…"
+            placeholder="0 / file / rtsp:// / .m3u8…"
             value={source}
             onChange={e => setSource(e.target.value)}
             disabled={isRunning}
           />
+        </div>
+
+        {/* Counting Mode: Per Line vs Per ID (always active, even while running) */}
+        <div className="flex flex-col gap-1">
+          <label className="font-code text-[10px] uppercase tracking-[0.2em] text-pip">
+            Count Mode
+          </label>
+          <div className="grid grid-cols-2 gap-1.5 bg-asphalt-deep p-1 rounded-sm border border-lane-dim/40">
+            <button
+              type="button"
+              onClick={() => handleModeChange('line')}
+              className={`py-1.5 px-2 rounded-sm font-code text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer ${
+                countMode === 'line'
+                  ? 'bg-lane text-asphalt shadow-glowlane'
+                  : 'text-pip hover:text-chalk'
+              }`}
+            >
+              Per Line
+            </button>
+            <button
+              type="button"
+              onClick={() => handleModeChange('id')}
+              className={`py-1.5 px-2 rounded-sm font-code text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer ${
+                countMode === 'id'
+                  ? 'bg-lane text-asphalt shadow-glowlane'
+                  : 'text-pip hover:text-chalk'
+              }`}
+            >
+              Per ID
+            </button>
+          </div>
+          <span className="font-code text-[10px] text-pip">
+            {countMode === 'id'
+              ? 'Semua motor & kendaraan di frame langsung dihitung sesuai ID.'
+              : 'Hitung kendaraan saat melewati garis hitung.'}
+          </span>
         </div>
 
         {/* Confidence — volume-style slider, percent */}
@@ -112,8 +167,6 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
             <span className="font-code text-sm font-bold text-lane w-10 text-right">{conf}%</span>
           </div>
         </div>
-
-        {/* Counting lines: drag endpoints on the live video (LineEditor) */}
 
         {/* Start / Stop buttons */}
         {!isRunning ? (
@@ -141,7 +194,7 @@ export default function PipelineControl({ status, onStatusChange, vertical = fal
       {status && (
         <p className="mt-2 font-code text-[10px] text-pip leading-relaxed break-all">
           {isRunning
-            ? `RUNNING · frame ${status.frame_index} · ${status.fps} fps · ${String(status.source).slice(0, 46)}…`
+            ? `RUNNING (${(status.count_mode || 'line').toUpperCase()}) · frame ${status.frame_index} · ${status.fps} fps · ${String(status.source).slice(0, 40)}`
             : 'Pipeline stopped'}
         </p>
       )}

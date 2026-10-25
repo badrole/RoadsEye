@@ -2,6 +2,7 @@
 
 Responsibilities:
 - Vehicle counting when tracks cross named counting lines
+- Direct per-ID vehicle counting for all tracked vehicles in frame
 - Speed estimation from pixel displacement × calibration factor
 - Per-class breakdown
 - Anomaly detection (count spikes, stopped vehicles)
@@ -11,13 +12,17 @@ from __future__ import annotations
 
 import datetime as _dt
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
+from core.detector import CLASS_NAMES
 from core.tracker import Track
+
+COUNT_MODES = ("line", "id")
+ID_MODE_LINE_NAME = "ID"
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -44,8 +49,8 @@ class FrameMetrics:
     timestamp: float
     frame_index: int
     # Counts
-    total_count: int                        # vehicles counted crossing all lines (summed)
-    count_per_class: dict[str, int]         # cumulative per class (from first line)
+    total_count: int                        # vehicles counted (per line or per ID)
+    count_per_class: dict[str, int]         # cumulative per class
     count_per_line: dict[str, int]          # cumulative count per named line
     vehicles_in_frame: int                  # currently visible tracks
     # Speed
@@ -142,10 +147,95 @@ class CountingLine:
 
         return crossed
 
+    def mark_counted(self, track_ids) -> None:
+        """Treat these tracks as already counted (used on count-mode switch)."""
+        now_ts = time.time()
+        for tid in track_ids:
+            self._crossed_ids[tid] = now_ts
+
     def _side(self, px: float, py: float) -> float:
         dx = self.p2[0] - self.p1[0]
         dy = self.p2[1] - self.p1[1]
         return float(np.sign(dx * (py - self.p1[1]) - dy * (px - self.p1[0])))
+
+
+# ── ID counter ───────────────────────────────────────────────────────────────
+
+class IdCounter:
+    """Counts every tracker ID in frame once, no line needed.
+
+    A track is counted immediately on its first tracked frame (MIN_HITS = 1)
+    so motorcycles and vehicles in frame are tallied as soon as they get an ID.
+    Over the next few frames, majority-vote class refinement corrects any
+    initial edge-of-frame misclassification (e.g. car -> motorcycle).
+    """
+
+    MIN_HITS = 1
+    MAX_VOTE_FRAMES = 5
+    FORGET_AFTER_S = 60.0
+
+    def __init__(self) -> None:
+        self._votes: dict[int, Counter] = {}
+        self._counted: set[int] = set()
+        self._counted_class: dict[int, str] = {}
+        self._last_seen: dict[int, float] = {}
+        self.total_count: int = 0
+        self.count_per_class: dict[str, int] = defaultdict(int)
+        self.last_counted: list[tuple[Track, str]] = []
+
+    def set_baseline_counts(self, baseline: dict[str, int]) -> None:
+        self.count_per_class = defaultdict(int, baseline)
+        self.total_count = sum(self.count_per_class.values())
+
+    def mark_counted(self, track_ids) -> None:
+        now_ts = time.time()
+        for tid in track_ids:
+            self._counted.add(tid)
+            self._last_seen[tid] = now_ts
+            self._votes.pop(tid, None)
+
+    def update(self, tracks: list[Track], count: bool = True) -> None:
+        now_ts = time.time()
+        self.last_counted = []
+        for track in tracks:
+            tid = track.track_id
+            self._last_seen[tid] = now_ts
+            votes = self._votes.get(tid)
+            if tid in self._counted:
+                # Refine class over the first MAX_VOTE_FRAMES sightings if needed
+                if votes is not None:
+                    votes[track.class_name] += 1
+                    best_cls = votes.most_common(1)[0][0]
+                    prev_cls = self._counted_class.get(tid)
+                    if prev_cls and best_cls != prev_cls:
+                        if self.count_per_class[prev_cls] > 0:
+                            self.count_per_class[prev_cls] -= 1
+                            if self.count_per_class[prev_cls] == 0:
+                                del self.count_per_class[prev_cls]
+                        self.count_per_class[best_cls] += 1
+                        self._counted_class[tid] = best_cls
+                    if sum(votes.values()) >= self.MAX_VOTE_FRAMES:
+                        del self._votes[tid]
+                continue
+
+            if votes is None:
+                votes = Counter()
+                self._votes[tid] = votes
+            votes[track.class_name] += 1
+            if count and sum(votes.values()) >= self.MIN_HITS:
+                cls = votes.most_common(1)[0][0]
+                self.total_count += 1
+                self.count_per_class[cls] += 1
+                self._counted.add(tid)
+                self._counted_class[tid] = cls
+                self.last_counted.append((track, cls))
+
+        for tid, ts in list(self._last_seen.items()):
+            if now_ts - ts > self.FORGET_AFTER_S:
+                del self._last_seen[tid]
+                self._counted.discard(tid)
+                self._counted_class.pop(tid, None)
+                self._votes.pop(tid, None)
 
 
 # ── Speed estimator ──────────────────────────────────────────────────────────
@@ -363,6 +453,35 @@ class AnalyticsEngine:
         self._current_date_wib: str = wib_now.strftime("%Y-%m-%d")
         self._today_baseline: dict[str, int] = {}
 
+        self.count_mode: str = "line"
+        self._id_counter = IdCounter()
+        self._visible_ids: set[int] = set()
+
+    def set_count_mode(self, mode: str) -> None:
+        """Switch between line-crossing and per-ID counting.
+
+        The daily tally carries over. Only vehicles already counted by the previous
+        mode are marked as counted in the new mode, so uncounted vehicles currently
+        in the frame are immediately counted when switching to 'id' mode.
+        """
+        if mode not in COUNT_MODES:
+            raise ValueError(f"count_mode must be one of {COUNT_MODES}, got {mode!r}")
+        if mode == self.count_mode:
+            return
+        carried = self.cumulative_counts
+        if mode == "id":
+            already_crossed = {tid for _, line in self._lines for tid in line._crossed_ids}
+            self._id_counter.set_baseline_counts(carried)
+            self._id_counter.mark_counted(already_crossed)
+        else:
+            if self._lines:
+                self._lines[0][1].set_baseline_counts(carried)
+                for _, line in self._lines[1:]:
+                    line.set_baseline_counts({})
+            for _, line in self._lines:
+                line.mark_counted(self._id_counter._counted)
+        self.count_mode = mode
+
     def set_today_baseline(self, baseline_counts: dict[str, int]) -> None:
         """Initialize or resume counts from today's database records.
 
@@ -371,6 +490,7 @@ class AnalyticsEngine:
         without multiplying across multiple lines.
         """
         self._today_baseline = dict(baseline_counts or {})
+        self._id_counter.set_baseline_counts(self._today_baseline)
         if self._lines:
             self._lines[0][1].set_baseline_counts(self._today_baseline)
             for _, line in self._lines[1:]:
@@ -389,7 +509,7 @@ class AnalyticsEngine:
 
     def set_lines(self, counting_lines: list[CountingLineSpec]) -> None:
         """Update line geometries while strictly preserving existing counts.
-        
+
         Clears _prev_sides when endpoints change to prevent false crossings
         when lines are moved across stationary or moving tracks.
         """
@@ -425,20 +545,25 @@ class AnalyticsEngine:
             for _, line in self._lines:
                 line.total_count = 0
                 line.count_per_class.clear()
+            self._id_counter.set_baseline_counts({})
 
-        # ── Multi-line counting ───────────────────────────────────────────────
+        # ── Multi-line counting (side state stays warm in ID mode) ─────────────
         count_per_line: dict[str, int] = {}
         total_count  = 0
-        count_per_class: dict[str, int] = {}
+        count_per_class: dict[str, int] = defaultdict(int)
         crossing_events: list[dict[str, Any]] = []
         frame_ts = time.time()
 
         warmup_done = self._frame_index >= self.WARMUP_FRAMES
         do_count = self.counting_enabled and warmup_done
+        id_mode = self.count_mode == "id"
+        self._visible_ids = {t.track_id for t in tracks}
         for name, line in self._lines:
-            line.update(tracks, count=do_count)
+            line.update(tracks, count=do_count and not id_mode)
             count_per_line[name] = line.total_count
             total_count += line.total_count
+            for cls_name, cnt in line.count_per_class.items():
+                count_per_class[cls_name] += cnt
 
             # Confirmed crossings (prev_side → side) — persisted per event
             for track, prev, side in line.last_crossings:
@@ -452,9 +577,24 @@ class AnalyticsEngine:
                     "timestamp":   frame_ts,
                 })
 
-        # Use the first line's per-class breakdown for backward compat
-        if self._lines:
-            count_per_class = dict(self._lines[0][1].count_per_class)
+        count_per_class = dict(count_per_class)
+
+        # ── Per-ID counting ───────────────────────────────────────────────────
+        if id_mode:
+            self._id_counter.update(tracks, count=do_count)
+            total_count = self._id_counter.total_count
+            count_per_class = dict(self._id_counter.count_per_class)
+            count_per_line = {ID_MODE_LINE_NAME: total_count}
+            for track, cls in self._id_counter.last_counted:
+                crossing_events.append({
+                    "line_name":   ID_MODE_LINE_NAME,
+                    "track_id":    track.track_id,
+                    "class_name":  cls,
+                    "class_id":    CLASS_NAMES.index(cls) if cls in CLASS_NAMES else track.class_id,
+                    "confidence":  round(track.confidence, 3),
+                    "direction":   "id",
+                    "timestamp":   frame_ts,
+                })
 
         # ── Speed ─────────────────────────────────────────────────────────────
         speed_samples = self.speed_estimator.update(tracks)
@@ -508,21 +648,13 @@ class AnalyticsEngine:
 
     @property
     def cumulative_counts(self) -> dict[str, int]:
-        if self._lines:
-            return dict(self._lines[0][1].count_per_class)
-        return {}
-
-    @property
-    def line_specs(self) -> list[CountingLineSpec]:
-        """Return the counting line specs for serialisation."""
-        out = []
-        for name, line in self._lines:
-            out.append(CountingLineSpec(
-                name=name,
-                p1=(int(line.p1[0]), int(line.p1[1])),
-                p2=(int(line.p2[0]), int(line.p2[1])),
-            ))
-        return out
+        if self.count_mode == "id":
+            return dict(self._id_counter.count_per_class)
+        merged: dict[str, int] = defaultdict(int)
+        for _, line in self._lines:
+            for cls_name, cnt in line.count_per_class.items():
+                merged[cls_name] += cnt
+        return dict(merged)
 
     def set_line_specs(self, specs: list[CountingLineSpec]) -> None:
         """Replace counting lines live without resetting vehicle counters.
@@ -545,6 +677,8 @@ class AnalyticsEngine:
                 new_line.total_count = matched.total_count
                 new_line.count_per_class = defaultdict(int, matched.count_per_class)
                 new_line._prev_sides = dict(matched._prev_sides)
+                new_line._crossed_ids = dict(matched._crossed_ids)
+                new_line._cooldowns = dict(matched._cooldowns)
 
             new_lines.append((spec.name, new_line))
 

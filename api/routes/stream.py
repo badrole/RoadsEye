@@ -13,7 +13,14 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from api.pipeline_manager import manager
-from api.schemas import LinesResponse, LinesUpdateRequest, PipelineStartRequest, PipelineStatus
+from api.schemas import (
+    CountModeRequest,
+    CountModeResponse,
+    LinesResponse,
+    LinesUpdateRequest,
+    PipelineStartRequest,
+    PipelineStatus,
+)
 from core.pipeline import PipelineConfig
 
 router = APIRouter(tags=["stream"])
@@ -36,6 +43,7 @@ async def start_pipeline(req: PipelineStartRequest) -> PipelineStatus:
         loop=req.loop,
         draw_annotations=req.draw_annotations,
         jpeg_quality=req.jpeg_quality,
+        count_mode=req.count_mode or manager.count_mode,
     )
 
     await manager.start(config)
@@ -79,17 +87,26 @@ async def update_lines(req: LinesUpdateRequest) -> LinesResponse:
     return LinesResponse(counting_lines=_status_lines(counting))
 
 
+@router.get("/pipeline/count-mode", response_model=CountModeResponse)
+async def get_count_mode() -> CountModeResponse:
+    return CountModeResponse(mode=manager.count_mode)
+
+
+@router.post("/pipeline/count-mode", response_model=CountModeResponse)
+async def update_count_mode(req: CountModeRequest) -> CountModeResponse:
+    """Switch between line-crossing and per-ID counting; the daily tally carries over."""
+    manager.set_count_mode(req.mode)
+    return CountModeResponse(mode=manager.count_mode)
+
+
 # ── WebSocket: video frames ───────────────────────────────────────────────────
 
 @router.websocket("/ws/video")
 async def ws_video(ws: WebSocket) -> None:
     """Stream annotated JPEG frames as binary WebSocket messages.
 
-    The client should display each binary blob as an image (e.g. via
-    URL.createObjectURL or setting img.src to a blob URL).
-
-    The pipeline must already be running — start it via POST /pipeline/start first.
-    If the pipeline stops, this WebSocket closes automatically.
+    Drains intermediate queued frames before sending so the client always
+    receives the freshest available frame with minimal latency.
     """
     await ws.accept()
 
@@ -105,6 +122,11 @@ async def ws_video(ws: WebSocket) -> None:
                 break
             try:
                 jpeg_bytes = await asyncio.wait_for(q.get(), timeout=5.0)
+                while not q.empty():
+                    try:
+                        jpeg_bytes = q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
                 await ws.send_bytes(jpeg_bytes)
             except asyncio.TimeoutError:
                 # Send a ping to keep connection alive and check if pipeline died

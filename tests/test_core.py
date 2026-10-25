@@ -191,3 +191,113 @@ class TestAnomalyDetector:
             alerts = detector.update([track])
 
         assert any("Stopped" in a.message for a in alerts)
+
+
+    def test_id_mode_counts_motorcycles_in_frame_immediately(self):
+        engine = AnalyticsEngine()
+        engine.set_count_mode("id")
+
+        # Frame 1: 2 motorcycles (class_id=2) and 1 car (class_id=0) in frame
+        tracks = [
+            make_track(10, 50, 50, 90, 120, class_id=2),
+            make_track(11, 150, 60, 190, 130, class_id=2),
+            make_track(12, 300, 100, 420, 220, class_id=0),
+        ]
+        m1 = engine.update(tracks)
+        assert m1.total_count == 3
+        assert m1.count_per_class["motorcycle"] == 2
+        assert m1.count_per_class["car"] == 1
+        assert len(m1.crossings) == 3
+        assert {c["track_id"] for c in m1.crossings} == {10, 11, 12}
+
+        # Frame 2: same IDs still in frame -> must NOT double-count
+        m2 = engine.update(tracks)
+        assert m2.total_count == 3
+        assert m2.count_per_class["motorcycle"] == 2
+        assert m2.crossings == []
+
+    def test_switch_line_to_id_counts_uncounted_in_frame_vehicles(self):
+        from core.analytics import CountingLineSpec
+        engine = AnalyticsEngine(counting_lines=[CountingLineSpec("line1", (0, 200), (1280, 200))])
+
+        # Track 1 crosses line1; Track 2 (motorcycle) is in frame above line1 (uncounted)
+        engine.update([
+            make_track(1, 0, 50, 100, 150, class_id=0),
+            make_track(2, 200, 50, 250, 120, class_id=2),
+        ])
+        m_line = engine.update([
+            make_track(1, 0, 220, 100, 320, class_id=0),
+            make_track(2, 200, 60, 250, 130, class_id=2),
+        ])
+        assert m_line.total_count == 1
+        assert m_line.count_per_class == {"car": 1}
+
+        # Switch to "id" mode while Track 1 and Track 2 are still in frame:
+        # Track 1 was already counted by line1 (must not double-count),
+        # Track 2 (motorcycle) was NOT counted yet (must be counted immediately).
+        engine.set_count_mode("id")
+        m_id = engine.update([
+            make_track(1, 0, 240, 100, 340, class_id=0),
+            make_track(2, 200, 70, 250, 140, class_id=2),
+        ])
+        assert m_id.total_count == 2
+        assert m_id.count_per_class["car"] == 1
+        assert m_id.count_per_class["motorcycle"] == 1
+        assert len(m_id.crossings) == 1
+        assert m_id.crossings[0]["track_id"] == 2
+        assert m_id.crossings[0]["class_name"] == "motorcycle"
+
+
+def test_hls_pipeline_preserves_all_segment_frames():
+    import asyncio
+    from core.pipeline import Pipeline, PipelineConfig
+    from core.video_source import FrameMeta
+
+    class FakeHlsSource:
+        fps = 50.0
+        is_live = True
+        is_hls = True
+
+        def __init__(self, total: int = 30) -> None:
+            self._total = total
+            self._idx = 0
+
+        def read(self):
+            if self._idx >= self._total:
+                return None, FrameMeta(self._idx, 0.0, "http://example/live.m3u8")
+            frame = np.zeros((64, 64, 3), dtype=np.uint8)
+            meta = FrameMeta(self._idx, 0.0, "http://example/live.m3u8")
+            self._idx += 1
+            return frame, meta
+
+        def close(self) -> None:
+            pass
+
+    class FakeDetector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def detect(self, _frame):
+            self.calls += 1
+            return []
+
+    pipeline = Pipeline(PipelineConfig(source="http://example/live.m3u8", draw_annotations=False))
+
+    def fake_setup():
+        from core.tracker import Tracker
+        pipeline._source = FakeHlsSource(30)
+        pipeline._detector = FakeDetector()
+        pipeline._tracker = Tracker(frame_rate=50)
+        pipeline._analytics = AnalyticsEngine(fps=50.0)
+
+    pipeline.setup = fake_setup
+
+    async def collect():
+        out = []
+        async for jpeg, met in pipeline.run_async():
+            out.append((jpeg, met))
+        return out
+
+    results = asyncio.run(collect())
+    assert len(results) == 30
+    assert pipeline._detector.calls == 30

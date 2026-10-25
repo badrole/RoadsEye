@@ -1,9 +1,10 @@
 /**
- * LineEditor — interactive counting line editor over the live CCTV canvas.
+ * LineEditor — interactive counting line editor & counting mode switcher
+ * over the live CCTV canvas.
  *
- * Drag endpoints (p1 / p2) to change angles and length, or drag the line body
- * to move the whole line.
- * Committed via POST /api/pipeline/lines (counts are preserved and never reset).
+ * Supports switching between:
+ *   - "line" mode (count vehicles crossing tripwire lines)
+ *   - "id" mode   (count every tracked vehicle/motorcycle in frame by ID)
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
 
@@ -11,16 +12,45 @@ const API = '/api'
 const CYAN = '#22d3ee'
 const YELLOW = '#FFD100'
 
-export default function LineEditor({ canvasRef }) {
+export default function LineEditor({ canvasRef, countMode = 'line', onCountModeChange }) {
   const overlayRef = useRef(null)
   const [editing, setEditing] = useState(false)
   const [lines, setLines] = useState({ counting: [] })
   const [selectedIdx, setSelectedIdx] = useState(null)
   const [savedNotice, setSavedNotice] = useState(false)
+  const [switchingMode, setSwitchingMode] = useState(false)
 
   const dragRef = useRef(null)
   const frameRef = useRef({ w: 1280, h: 720 })
   const [overlayTick, setOverlayTick] = useState(0)
+
+  const idMode = countMode === 'id'
+
+  useEffect(() => {
+    if (idMode && editing) {
+      setEditing(false)
+      setSelectedIdx(null)
+    }
+  }, [idMode, editing])
+
+  const handleModeSwitch = useCallback(async (nextMode) => {
+    if (nextMode === countMode || switchingMode) return
+    setSwitchingMode(true)
+    try {
+      const res = await fetch(`${API}/pipeline/count-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: nextMode }),
+      })
+      if (res.ok) {
+        onCountModeChange?.(nextMode)
+      }
+    } catch {
+      /* ignore network hiccup */
+    } finally {
+      setSwitchingMode(false)
+    }
+  }, [countMode, switchingMode, onCountModeChange])
 
   // ── Hydration ──────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
@@ -104,15 +134,12 @@ export default function LineEditor({ canvasRef }) {
 
     for (let i = arr.length - 1; i >= 0; i--) {
       const l = arr[i]
-      // Endpoint 1 (p1) — 24 CSS pixels radius
       if (Math.hypot(fx - l.x1, fy - l.y1) * scale <= 24) {
         return { idx: i, part: 'p1' }
       }
-      // Endpoint 2 (p2) — 24 CSS pixels radius
       if (Math.hypot(fx - l.x2, fy - l.y2) * scale <= 24) {
         return { idx: i, part: 'p2' }
       }
-      // Line body — 16 CSS pixels radius
       const ax = l.x1, ay = l.y1, bx = l.x2, by = l.y2
       const segLenSq = (bx - ax) ** 2 + (by - ay) ** 2 || 1
       const t = Math.max(0, Math.min(1, ((fx - ax) * (bx - ax) + (fy - ay) * (by - ay)) / segLenSq))
@@ -128,9 +155,7 @@ export default function LineEditor({ canvasRef }) {
 
   // ── Pointer events ─────────────────────────────────────────────────────────
   const onPointerDown = useCallback((e) => {
-    if (!editing) return
-    // Force-sync overlay dimensions from the video canvas BEFORE computing
-    // coordinates — the 500 ms interval may not have fired yet on first drag.
+    if (!editing || idMode) return
     const c = canvasRef?.current
     if (c && c.width > 0) {
       frameRef.current = { w: c.width, h: c.height }
@@ -158,7 +183,7 @@ export default function LineEditor({ canvasRef }) {
       setSelectedIdx(null)
       dragRef.current = null
     }
-  }, [editing, canvasRef, toFrame, hitTest, lines])
+  }, [editing, idMode, canvasRef, toFrame, hitTest, lines])
 
   const onPointerMove = useCallback((e) => {
     const drag = dragRef.current
@@ -171,15 +196,12 @@ export default function LineEditor({ canvasRef }) {
 
     let x1 = o.x1, y1 = o.y1, x2 = o.x2, y2 = o.y2
     if (drag.hit.part === 'p1') {
-      // Freeform drag endpoint 1
       x1 = Math.max(0, Math.min(fr.w, fx))
       y1 = Math.max(0, Math.min(fr.h, fy))
     } else if (drag.hit.part === 'p2') {
-      // Freeform drag endpoint 2
       x2 = Math.max(0, Math.min(fr.w, fx))
       y2 = Math.max(0, Math.min(fr.h, fy))
     } else if (drag.hit.part === 'body') {
-      // Move entire line body
       x1 = Math.max(0, Math.min(fr.w, o.x1 + dx))
       y1 = Math.max(0, Math.min(fr.h, o.y1 + dy))
       x2 = Math.max(0, Math.min(fr.w, o.x2 + dx))
@@ -204,8 +226,6 @@ export default function LineEditor({ canvasRef }) {
 
   // ── Sync frame dimensions with canvas ──────────────────────────────────────
   useEffect(() => {
-    // Overlay bitmap must match the video bitmap exactly, and re-run when the
-    // stream resolution changes (resolution shift = element resize too).
     const cv = overlayRef.current
     if (!cv) return
     const apply = () => {
@@ -214,11 +234,11 @@ export default function LineEditor({ canvasRef }) {
         frameRef.current = { w: c.width, h: c.height }
         if (cv.width !== frameRef.current.w) cv.width = frameRef.current.w
         if (cv.height !== frameRef.current.h) cv.height = frameRef.current.h
-        setOverlayTick((t) => t + 1)   // repaint overlay in the new scale
+        setOverlayTick((t) => t + 1)
       }
     }
     apply()
-    const id = setInterval(apply, 200)
+    const id = setInterval(apply, 300)
     return () => clearInterval(id)
   }, [canvasRef])
 
@@ -231,13 +251,12 @@ export default function LineEditor({ canvasRef }) {
     if (cv.height !== fr.h) cv.height = fr.h
     const ctx = cv.getContext('2d')
     ctx.clearRect(0, 0, cv.width, cv.height)
-    if (!editing) return
+    if (!editing || idMode) return
 
     lines.counting.forEach((l, i) => {
       const isSel = selectedIdx === i
       const color = isSel ? YELLOW : CYAN
 
-      // Outer glow for selected line
       if (isSel) {
         ctx.strokeStyle = 'rgba(255, 209, 0, 0.3)'
         ctx.lineWidth = 10
@@ -247,7 +266,6 @@ export default function LineEditor({ canvasRef }) {
         ctx.stroke()
       }
 
-      // Line stroke
       ctx.strokeStyle = color
       ctx.lineWidth = isSel ? 4 : 3
       ctx.beginPath()
@@ -255,9 +273,7 @@ export default function LineEditor({ canvasRef }) {
       ctx.lineTo(l.x2, l.y2)
       ctx.stroke()
 
-      // Endpoint handles (drag points)
       for (const [ex, ey] of [[l.x1, l.y1], [l.x2, l.y2]]) {
-        // Outer dark circle
         ctx.fillStyle = '#0f172a'
         ctx.beginPath()
         ctx.arc(ex, ey, isSel ? 11 : 8, 0, Math.PI * 2)
@@ -266,14 +282,12 @@ export default function LineEditor({ canvasRef }) {
         ctx.lineWidth = isSel ? 3 : 2
         ctx.stroke()
 
-        // Inner solid dot
         ctx.fillStyle = color
         ctx.beginPath()
         ctx.arc(ex, ey, isSel ? 5 : 4, 0, Math.PI * 2)
         ctx.fill()
       }
 
-      // Line name label badge
       const midX = (l.x1 + l.x2) / 2
       const midY = (l.y1 + l.y2) / 2
       const label = `${l.name} (drag endpoint)`
@@ -289,51 +303,91 @@ export default function LineEditor({ canvasRef }) {
       ctx.fillStyle = color
       ctx.fillText(label, midX - textWidth / 2, midY - 7)
     })
-  }, [editing, lines, selectedIdx, overlayTick])
+  }, [editing, idMode, lines, selectedIdx, overlayTick])
 
   return (
     <>
       {/* Top Toolbar */}
-      <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
+      <div className="absolute top-3 right-3 z-30 flex flex-wrap items-center justify-end gap-2">
         {savedNotice && (
           <span className="px-2.5 py-1 rounded bg-go/20 border border-go text-go font-code text-[11px] font-bold shadow-md">
             ✓ Saved (counts preserved)
           </span>
         )}
 
-        <div className="flex items-center gap-1.5 p-1.5 rounded bg-asphalt-deep/90 border border-lane/40 backdrop-blur-md shadow-xl">
+        {/* 2-Option Counting Mode Toggle: Per Line vs Per ID */}
+        <div
+          role="group"
+          aria-label="Vehicle counting mode"
+          className="flex items-center p-1 rounded bg-asphalt-deep/90 border border-lane/40 backdrop-blur-md shadow-xl font-code text-xs"
+        >
           <button
-            onClick={() => setEditing((v) => !v)}
-            className={`px-3 py-1.5 font-code text-xs tracking-wider uppercase rounded transition-all cursor-pointer font-bold ${
-              editing
+            type="button"
+            disabled={switchingMode}
+            onClick={() => handleModeSwitch('line')}
+            title="Count vehicles when they cross the counting line"
+            className={`px-2.5 py-1 rounded-sm tracking-wider uppercase transition-all cursor-pointer font-bold ${
+              !idMode
                 ? 'bg-lane text-asphalt shadow-glowlane'
-                : 'bg-asphalt-deep/80 text-chalk hover:text-lane border border-lane-dim/50'
+                : 'text-pip hover:text-chalk'
             }`}
           >
-            {editing ? '✓ Done' : '✎ Edit Lines'}
+            Per Line
           </button>
-
-          {editing && (
-            <>
-              <button
-                onClick={addLine}
-                title="Add new counting line"
-                className="px-2.5 py-1.5 font-code text-xs rounded border border-lane/50 text-lane hover:bg-lane/20 transition-colors cursor-pointer"
-              >
-                + Add Line
-              </button>
-              {lines.counting.length > 1 && selectedIdx !== null && (
-                <button
-                  onClick={deleteSelected}
-                  title="Delete selected line"
-                  className="px-2.5 py-1.5 font-code text-xs rounded border border-stop/50 text-stop hover:bg-stop hover:text-white transition-colors cursor-pointer"
-                >
-                  ✕ Delete
-                </button>
-              )}
-            </>
-          )}
+          <button
+            type="button"
+            disabled={switchingMode}
+            onClick={() => handleModeSwitch('id')}
+            title="Count every vehicle & motorcycle in frame directly by tracker ID"
+            className={`px-2.5 py-1 rounded-sm tracking-wider uppercase transition-all cursor-pointer font-bold ${
+              idMode
+                ? 'bg-lane text-asphalt shadow-glowlane'
+                : 'text-pip hover:text-chalk'
+            }`}
+          >
+            Per ID
+          </button>
         </div>
+
+        {/* Line Editor Controls (shown when in Per Line mode) */}
+        {!idMode && (
+          <div className="flex items-center gap-1.5 p-1 rounded bg-asphalt-deep/90 border border-lane/40 backdrop-blur-md shadow-xl">
+            <button
+              type="button"
+              onClick={() => setEditing((v) => !v)}
+              className={`px-3 py-1 font-code text-xs tracking-wider uppercase rounded-sm transition-all cursor-pointer font-bold ${
+                editing
+                  ? 'bg-lane text-asphalt shadow-glowlane'
+                  : 'bg-asphalt-deep/80 text-chalk hover:text-lane border border-lane-dim/50'
+              }`}
+            >
+              {editing ? '✓ Done' : '✎ Edit Lines'}
+            </button>
+
+            {editing && (
+              <>
+                <button
+                  type="button"
+                  onClick={addLine}
+                  title="Add new counting line"
+                  className="px-2.5 py-1 font-code text-xs rounded-sm border border-lane/50 text-lane hover:bg-lane/20 transition-colors cursor-pointer"
+                >
+                  + Add Line
+                </button>
+                {lines.counting.length > 1 && selectedIdx !== null && (
+                  <button
+                    type="button"
+                    onClick={deleteSelected}
+                    title="Delete selected line"
+                    className="px-2.5 py-1 font-code text-xs rounded-sm border border-stop/50 text-stop hover:bg-stop hover:text-white transition-colors cursor-pointer"
+                  >
+                    ✕ Delete
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Overlay Canvas for Freeform Endpoint Dragging */}
@@ -345,7 +399,7 @@ export default function LineEditor({ canvasRef }) {
         onPointerLeave={() => {
           dragRef.current = null
         }}
-        className={`absolute inset-0 w-full h-full ${editing ? 'cursor-crosshair' : 'pointer-events-none'}`}
+        className={`absolute inset-0 w-full h-full ${editing && !idMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
       />
     </>
   )

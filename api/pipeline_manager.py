@@ -15,8 +15,9 @@ from core.pipeline import Pipeline, PipelineConfig
 from api.schemas import CountingLineStatus, MetricsMessage, PipelineStatus
 
 # Max frames queued for WebSocket consumers; older frames are dropped when full
-_VIDEO_QUEUE_MAXSIZE = 4
-_METRICS_QUEUE_MAXSIZE = 64
+_VIDEO_QUEUE_MAXSIZE = 2
+_METRICS_QUEUE_MAXSIZE = 32
+_METRICS_MIN_INTERVAL_S = 0.15
 
 
 class PipelineManager:
@@ -54,6 +55,8 @@ class PipelineManager:
         self._delay_start: float | None = None
         self._counting_armed = True            # False while the timeshift buffer loads
         self._delay_task: asyncio.Task | None = None
+        mode = os.environ.get("COUNT_MODE", "line").strip().lower()
+        self._count_mode = mode if mode in ("line", "id") else "line"
 
     def _load_default_lines(self) -> None:
         import json
@@ -82,6 +85,18 @@ class PipelineManager:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    @property
+    def count_mode(self) -> str:
+        return self._count_mode
+
+    def set_count_mode(self, mode: str) -> None:
+        """Switch line/ID counting live (or set the mode for the next start)."""
+        self._count_mode = mode
+        if self._config is not None:
+            self._config.count_mode = mode
+        if self._pipeline is not None:
+            self._pipeline.set_count_mode(mode)
+
     def status(self) -> PipelineStatus:
         is_preroll = self._preroll_pct is not None and self.running
         uptime = 0.0 if is_preroll else (time.time() - self._start_time if self.running else 0.0)
@@ -106,6 +121,7 @@ class PipelineManager:
             fps=round(fps, 1),
             demo_mode=False,
             preroll_pct=self._preroll_pct if self.running else None,
+            count_mode=self._count_mode,
             counting_lines=lines,
         )
 
@@ -134,6 +150,7 @@ class PipelineManager:
             self._counting_armed = self._eff_delay <= 0
 
             self._config = config
+            self._count_mode = config.count_mode
             self._pipeline = Pipeline(config, counting_enabled=self._counting_armed)
             self._pipeline.set_counting_enabled(self._counting_armed)
 
@@ -267,8 +284,33 @@ class PipelineManager:
         import api.events_db as events_db
 
         try:
+            last_metrics_push = 0.0
             async for jpeg_bytes, raw_metrics in self._pipeline.run_async():
+                if self._frame_index == 0 and self._eff_delay <= 0:
+                    self._start_time = time.time()
                 self._frame_index += 1
+                now_ts = time.time()
+                has_crossings = bool(raw_metrics.crossings)
+                should_push_metrics = has_crossings or (now_ts - last_metrics_push >= _METRICS_MIN_INTERVAL_S)
+
+                # ── Frame delivery: direct for eff_delay <= 0, buffered for timeshift
+                if self._eff_delay <= 0:
+                    for q in list(self._video_queues):
+                        if q.full():
+                            try:
+                                q.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                        try:
+                            q.put_nowait(jpeg_bytes)
+                        except asyncio.QueueFull:
+                            pass
+                else:
+                    self._delay_buffer.append((now_ts, jpeg_bytes))
+
+                if not should_push_metrics and self._frame_index % 1500 != 0:
+                    continue
+
                 metrics = MetricsMessage.from_frame_metrics(raw_metrics)
 
                 # Persist confirmed counting crossings when armed (loading 100%)
@@ -294,9 +336,8 @@ class PipelineManager:
                         asyncio.create_task(upsert_hourly(metrics))
 
                     # Periodic auto backup to Google Sheets (every 15 minutes = 900s)
-                    if time.time() - self._last_sheets_sync_time >= 900:
-                        self._last_sheets_sync_time = time.time()
-                        events_db.writer.flush()
+                    if now_ts - self._last_sheets_sync_time >= 900:
+                        self._last_sheets_sync_time = now_ts
                         try:
                             import api.sheets_sync as sheets_sync
                             if sheets_sync.is_configured():
@@ -304,27 +345,19 @@ class PipelineManager:
                         except Exception as e:
                             print(f"[PipelineManager] Periodic sheets sync trigger error: {e}")
 
-                # ── Frame delivery: direct for eff_delay <= 0, buffered for timeshift
-                if self._eff_delay <= 0:
-                    for q in list(self._video_queues):
-                        if q.full():
+                # Fan-out metrics
+                if should_push_metrics:
+                    last_metrics_push = now_ts
+                    for q in list(self._metrics_queues):
+                        if q.full() and not has_crossings:
                             try:
                                 q.get_nowait()
                             except asyncio.QueueEmpty:
                                 pass
                         try:
-                            q.put_nowait(jpeg_bytes)
+                            q.put_nowait(metrics)
                         except asyncio.QueueFull:
                             pass
-                else:
-                    self._delay_buffer.append((time.time(), jpeg_bytes))
-
-                # Fan-out metrics
-                for q in list(self._metrics_queues):
-                    try:
-                        q.put_nowait(metrics)
-                    except asyncio.QueueFull:
-                        pass   # slow consumer — drop frame
 
         except asyncio.CancelledError:
             pass
@@ -338,9 +371,6 @@ class PipelineManager:
                 try:
                     import api.sheets_sync as sheets_sync
                     if sheets_sync.is_configured():
-                        # Fire-and-forget thread — a blocking .result() here
-                        # would freeze the whole event loop (seen as HTTP 500)
-                        # whenever a session disconnects.
                         import threading as _threading
                         _threading.Thread(
                             target=sheets_sync.sync_to_google_sheets,

@@ -14,7 +14,9 @@ Environment variables (see .env.example):
 """
 from __future__ import annotations
 
+import ctypes
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,6 +38,10 @@ from api.routes import analytics, health, stream
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    if sys.platform == "win32":
+        # Default Windows timer tick is 15.6 ms; asyncio waits round up to it,
+        # which shows as uneven frame delivery. 1 ms while the API runs.
+        ctypes.windll.winmm.timeBeginPeriod(1)
     await init_db()
     print("[API] Database initialised.")
 
@@ -86,6 +92,7 @@ async def lifespan(app: FastAPI):
             confidence_threshold=float(os.environ.get("CONFIDENCE_THRESHOLD", "0.25")),
             iou_threshold=float(os.environ.get("IOU_THRESHOLD", "0.45")),
             counting_lines=counting_lines,
+            count_mode=manager.count_mode,
         )
         await manager.start(config)
         print(f"[API] Pipeline auto-started with source={src!r}, count_lines={[l.name for l in counting_lines]}")
@@ -101,6 +108,8 @@ async def lifespan(app: FastAPI):
     import api.events_db as events_db
     events_db.writer.stop()
     print("[API] Event writer flushed and stopped.")
+    if sys.platform == "win32":
+        ctypes.windll.winmm.timeEndPeriod(1)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────

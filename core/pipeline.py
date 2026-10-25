@@ -12,7 +12,8 @@ import argparse
 import asyncio
 import threading
 import time
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from typing import AsyncGenerator, Generator
 
 import cv2
@@ -23,24 +24,13 @@ from core.tracker import Tracker, Track
 from core.video_source import VideoSource
 
 
-def _as_track(row: dict) -> Track:
-    """Lightweight Track view over a serialized metrics track dict."""
-    t = object.__new__(Track)
-    t.track_id = int(row["id"])
-    t.bbox = tuple(row["bbox"])
-    t.confidence = float(row.get("confidence", 1.0))
-    t.class_id = int(row.get("class_id", 0))
-    t.class_name = str(row.get("class_name", "unknown"))
-    return t
-
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class PipelineConfig:
     source: str | int = 0
     model_path: str | None = None
-    confidence_threshold: float = 0.35
+    confidence_threshold: float = 0.25
     iou_threshold: float = 0.45
     input_size: int = 640
     skip_frames: int = 0
@@ -48,7 +38,8 @@ class PipelineConfig:
     pixels_per_meter: float = 10.0
     loop: bool = False
     draw_annotations: bool = True
-    jpeg_quality: int = 80
+    jpeg_quality: int = 72
+    count_mode: str = "line"   # "line" = tripwire crossings, "id" = every tracker ID once
 
     @property
     def demo_mode(self) -> bool:
@@ -62,6 +53,7 @@ class _ReusedTrack:
         self.bbox = tuple(d.get("bbox", (0, 0, 0, 0)))
         self.class_id = int(d.get("class_id", 0))
         self.class_name = str(d.get("class_name", "vehicle"))
+
 
 def _as_track(d: dict) -> _ReusedTrack:
     return _ReusedTrack(d)
@@ -113,6 +105,7 @@ class Pipeline:
         self._initial_counts: dict[str, int] = {}
         self._line_flash: dict[str, int] = {}       # line_name -> remaining flash frames
         self._crossed_flash: dict[int, int] = {}    # track_id -> remaining flash frames
+        self._analytics_lock = threading.Lock()     # worker thread vs live API edits
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -147,6 +140,7 @@ class Pipeline:
             fps=fps,
         )
         self._analytics.counting_enabled = self._counting_enabled
+        self._analytics.set_count_mode(cfg.count_mode)
         if self._initial_counts:
             self._analytics.set_today_baseline(self._initial_counts)
 
@@ -156,6 +150,7 @@ class Pipeline:
             print(f"[Pipeline] Source  : {self._source}")
             print(f"[Pipeline] Detector: {self._detector}")
         print(f"[Pipeline] Lines   : {[s.name for s in cfg.counting_lines]}")
+        print(f"[Pipeline] Count   : {cfg.count_mode} mode")
         print(f"[Pipeline] Skip    : every {cfg.skip_frames + 1} frames")
 
     def teardown(self) -> None:
@@ -179,6 +174,13 @@ class Pipeline:
         """Gate tallying (side state stays warm) — used during timeshift load."""
         if self._analytics is not None:
             self._analytics.counting_enabled = bool(enabled)
+
+    def set_count_mode(self, mode: str) -> None:
+        """Switch line/ID counting on a running pipeline without losing the tally."""
+        with self._analytics_lock:
+            if self._analytics is not None:
+                self._analytics.set_count_mode(mode)
+            self.config.count_mode = mode
 
     # ── Sync runner ───────────────────────────────────────────────────────────
 
@@ -208,135 +210,252 @@ class Pipeline:
 
     # ── Async runner ──────────────────────────────────────────────────────────
 
+    JITTER_BUFFER_S = 0.35
+
     async def run_async(self) -> AsyncGenerator[tuple[bytes, FrameMetrics], None]:
-        self.setup()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.setup)
         self._running = True
-        loop = asyncio.get_event_loop()
         try:
             if self.config.demo_mode:
                 async for result in self._run_demo_async(loop):
                     yield result
             else:
-                # Threaded reader + paced output: video flows at the source's
-                # native fps while the detector runs on a stride, so the stream
-                # stays smooth instead of skipping between processed frames.
-                fps = self._source.fps or 25.0
-                if fps < 10.0:
-                    fps = 10.0
-                frame_interval = 1.0 / fps                # Detect every paced frame — GPU inference (~20 ms) comfortably
-                # fits the source interval, and skipping frames makes small
-                # fast objects (motorcycles) flicker out of the tracker.
-                stride = max(self.config.skip_frames, 0)
-
-                latest: dict = {"frame": None, "idx": 0, "seq": 0}
-                lock = threading.Lock()
-
-                closing = threading.Event()
-
-                def reader() -> None:
-                    fails = 0
-                    reopens = 0
-                    t_prev = time.monotonic()
-                    while self._running and not closing.is_set():
-                        frame, meta = self._source.read()
-                        if frame is None:
-                            if closing.is_set():
-                                break
-                            if not self._source.is_live:
-                                self._running = False
-                                break
-                            fails += 1
-                            if fails >= 25:
-                                if reopens < 5:
-                                    reopens += 1
-                                    print(f"[Pipeline] Live source stalled — re-opening ({reopens}/5)")
-                                    try:
-                                        self._source.close()
-                                        self._source.open()
-                                        t_prev = time.monotonic()
-                                    except Exception as exc:
-                                        print(f"[Pipeline] Re-open failed: {exc}")
-                                    fails = 0
-                                    continue
-                                self._running = False
-                                break
-                            time.sleep(0.04)
-                            continue
-                        fails = 0
-                        reopens = 0
-                        with lock:
-                            latest["frame"] = frame
-                            latest["idx"] = meta.index
-                            latest["seq"] += 1
-
-                        # Smooth nominal pace to prevent runaway reading
-                        now = time.monotonic()
-                        elapsed = now - t_prev
-                        wait = frame_interval - elapsed
-                        if wait > 0:
-                            time.sleep(min(wait, frame_interval))
-                        t_prev = time.monotonic()
-
-                rt = threading.Thread(target=reader, name="video-reader", daemon=True)
-                rt.start()
-
-                c_lock = threading.Lock()
-                cache: dict = {"jpeg": None, "metrics": None, "seq": 0, "idx": -1}
-
-                def worker() -> None:
-                    """Dedicated inference thread: grabs newest frame, runs
-                    detect+track+draw+encode. Each frame is consumed exactly
-                    once via the seq counter — prevents double-counting."""
-                    last_consumed_seq = 0
-                    while self._running and not closing.is_set():
-                        with lock:
-                            frame = latest["frame"]
-                            idx = latest["idx"]
-                            rseq = latest["seq"]
-                        if frame is None or rseq == last_consumed_seq:
-                            time.sleep(0.003)
-                            continue
-                        last_consumed_seq = rseq
-                        try:
-                            jpeg, met = self._process_live_frame(frame, idx)
-                        except Exception as exc:
-                            print(f"[Pipeline] inference worker: {exc}")
-                            time.sleep(0.02)
-                            continue
-                        with c_lock:
-                            cache["jpeg"] = jpeg
-                            cache["metrics"] = met
-                            cache["seq"] += 1
-                            cache["idx"] = idx
-
-                wt = threading.Thread(target=worker, name="inference-worker", daemon=True)
-                wt.start()
-
-                last_drawn_seq = -1
-                try:
-                    while self._running:
-                        t0 = time.perf_counter()
-                        with c_lock:
-                            jpeg_bytes, cached_metrics, produced = (
-                                cache["jpeg"], cache["metrics"], cache["seq"]
-                            )
-                        if jpeg_bytes is None or cached_metrics is None or produced == last_drawn_seq:
-                            await asyncio.sleep(0.003)
-                            continue
-
-                        last_drawn_seq = produced
-                        yield jpeg_bytes, cached_metrics
-
-                        wait = frame_interval - (time.perf_counter() - t0)
-                        if wait > 0:
-                            await asyncio.sleep(wait)
-                finally:
-                    closing.set()
-                    rt.join(timeout=2.0)
-                    wt.join(timeout=2.0)
-                    self.teardown()
+                async for result in self._run_live_async(loop):
+                    yield result
         finally:
             self._running = False
+
+    async def _run_live_async(
+        self, loop: asyncio.AbstractEventLoop
+    ) -> AsyncGenerator[tuple[bytes, FrameMetrics], None]:
+        """4-stage concurrent pipeline: reader → inference → encoder → pacer.
+
+        Separating GPU inference from CPU drawing + JPEG encoding allows the GPU
+        and CPU to work in parallel on consecutive frames instead of waiting on
+        each other sequentially.
+        """
+        fps = min(max(self._source.fps or 25.0, 10.0), 60.0)
+        interval = 1.0 / fps
+        live = self._source.is_live
+        is_hls = getattr(self._source, "is_hls", False)
+        drop_old = live and not is_hls
+        stride = max(self.config.skip_frames, 0)
+        prebuffer = max(2, int(fps * self.JITTER_BUFFER_S)) if is_hls else 2
+        raw_cap = int(fps * 2) if is_hls else (6 if live else int(fps * 2))
+        enc_cap = 8
+        out_cap = int(fps * 2)
+        burst_threshold = max(4, int(fps * 0.6))
+
+        raw: deque = deque()
+        raw_cv = threading.Condition()
+        enc: deque = deque()
+        enc_cv = threading.Condition()
+        out: deque = deque()
+        out_cv = threading.Condition()
+        closing = threading.Event()
+        src_done = threading.Event()
+        inf_done = threading.Event()
+        enc_done = threading.Event()
+        aq: asyncio.Queue = asyncio.Queue()
+
+        def alive() -> bool:
+            return self._running and not closing.is_set()
+
+        def reader() -> None:
+            fails = reopens = 0
+            try:
+                while alive():
+                    frame, meta = self._source.read()
+                    if frame is None:
+                        if not alive() or not self._source.is_live:
+                            break
+                        fails += 1
+                        if fails >= 25:
+                            if reopens >= 5:
+                                break
+                            reopens += 1
+                            print(f"[Pipeline] Live source stalled — re-opening ({reopens}/5)")
+                            try:
+                                self._source.close()
+                                self._source.open()
+                            except Exception as exc:
+                                print(f"[Pipeline] Re-open failed: {exc}")
+                            fails = 0
+                            continue
+                        time.sleep(0.02)
+                        continue
+                    fails = reopens = 0
+                    with raw_cv:
+                        if drop_old:
+                            if len(raw) >= raw_cap:
+                                raw.popleft()   # shed oldest stale frame
+                        else:
+                            while len(raw) >= raw_cap and alive():
+                                raw_cv.wait(0.02)
+                        raw.append((frame, meta.index))
+                        raw_cv.notify_all()
+            finally:
+                src_done.set()
+                with raw_cv:
+                    raw_cv.notify_all()
+
+        def inference_worker() -> None:
+            n = 0
+            last_met: FrameMetrics | None = None
+            last_tracks: list = []
+            try:
+                while alive():
+                    with raw_cv:
+                        while not raw and not src_done.is_set() and alive():
+                            raw_cv.wait(0.02)
+                        if not raw:
+                            if src_done.is_set():
+                                break
+                            continue
+                        raw_backlog = len(raw)
+                        frame, idx = raw.popleft()
+                        raw_cv.notify_all()
+                    try:
+                        reuse = (
+                            last_met is not None
+                            and (
+                                (stride and (n % (stride + 1) != 0))
+                                or (drop_old and raw_backlog > burst_threshold and (n % 2 == 1))
+                            )
+                        )
+                        if reuse:
+                            tracks = last_tracks
+                            met = replace(last_met, crossings=[])
+                        else:
+                            tracks, met = self._infer_frame(frame, idx)
+                            last_met = met
+                            last_tracks = tracks
+                    except Exception as exc:
+                        print(f"[Pipeline] inference worker: {exc}")
+                        continue
+                    finally:
+                        n += 1
+                    with enc_cv:
+                        if drop_old:
+                            if len(enc) >= enc_cap:
+                                enc.popleft()
+                        else:
+                            while len(enc) >= enc_cap and alive():
+                                enc_cv.wait(0.02)
+                        enc.append((frame, tracks, met))
+                        enc_cv.notify_all()
+            finally:
+                inf_done.set()
+                with enc_cv:
+                    enc_cv.notify_all()
+
+        def encode_worker() -> None:
+            try:
+                while alive():
+                    with enc_cv:
+                        while not enc and not inf_done.is_set() and alive():
+                            enc_cv.wait(0.02)
+                        if not enc:
+                            if inf_done.is_set():
+                                break
+                            continue
+                        frame, tracks, met = enc.popleft()
+                        enc_cv.notify_all()
+                    try:
+                        annotated = (
+                            self._draw(frame, tracks, met, in_place=True)
+                            if self.config.draw_annotations
+                            else frame
+                        )
+                        jpeg = self._encode_jpeg(annotated)
+                    except Exception as exc:
+                        print(f"[Pipeline] encode worker: {exc}")
+                        continue
+                    with out_cv:
+                        if drop_old:
+                            if len(out) >= out_cap:
+                                out.popleft()
+                        else:
+                            while len(out) >= out_cap and alive():
+                                out_cv.wait(0.02)
+                        out.append((jpeg, met))
+                        out_cv.notify_all()
+            finally:
+                enc_done.set()
+                with out_cv:
+                    out_cv.notify_all()
+
+        def emit(item) -> None:
+            try:
+                loop.call_soon_threadsafe(aq.put_nowait, item)
+            except RuntimeError:
+                pass   # event loop already closed (app shutdown)
+
+        def pacer() -> None:
+            buffering = True
+            next_due = 0.0
+            try:
+                while alive():
+                    with out_cv:
+                        if buffering and len(out) < prebuffer and not enc_done.is_set():
+                            out_cv.wait(0.01)
+                            continue
+                        if buffering:
+                            buffering = False
+                            next_due = time.perf_counter()
+                        if not out:
+                            if enc_done.is_set():
+                                break
+                            out_cv.wait(0.005)
+                            continue
+                        depth = len(out)
+                        item = out.popleft()
+                        out_cv.notify_all()
+
+                    # Smoothly adapt cadence without re-entering a hard buffer freeze
+                    step = interval
+                    if drop_old:
+                        if depth > prebuffer * 3:
+                            step *= 0.65
+                        elif depth > prebuffer * 2:
+                            step *= 0.85
+                        elif depth <= 1:
+                            step *= 1.06
+
+                    now = time.perf_counter()
+                    delay = next_due - now
+                    if delay > 0:
+                        time.sleep(delay)
+                    elif delay < -0.1:
+                        next_due = now
+                    next_due += step
+                    emit(item)
+            finally:
+                emit(None)
+
+        threads = [
+            threading.Thread(target=reader, name="video-reader", daemon=True),
+            threading.Thread(target=inference_worker, name="inference-worker", daemon=True),
+            threading.Thread(target=encode_worker, name="encode-worker", daemon=True),
+            threading.Thread(target=pacer, name="frame-pacer", daemon=True),
+        ]
+        for t in threads:
+            t.start()
+        try:
+            while True:
+                item = await aq.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            closing.set()
+            for cv in (raw_cv, enc_cv, out_cv):
+                with cv:
+                    cv.notify_all()
+            for t in threads:
+                t.join(timeout=2.0)
+            self.teardown()
 
     async def _run_demo_async(
         self, loop: asyncio.AbstractEventLoop
@@ -355,38 +474,41 @@ class Pipeline:
 
     def _draw_reuse(self, frame: np.ndarray, metrics: FrameMetrics) -> np.ndarray:
         """Annotate a frame using metrics."""
-        return self._draw(frame, [_as_track(t) for t in metrics.tracks], metrics)
+        return self._draw(frame, [_as_track(t) for t in metrics.tracks], metrics, in_place=True)
+
+    def _apply_crossing_flash(self, metrics: FrameMetrics) -> None:
+        if metrics.crossings:
+            for c in metrics.crossings:
+                lname = c.get("line_name") if isinstance(c, dict) else getattr(c, "line_name", None)
+                tid = c.get("track_id") if isinstance(c, dict) else getattr(c, "track_id", None)
+                if lname:
+                    self._line_flash[lname] = 8
+                if tid is not None:
+                    self._crossed_flash[tid] = 10
+
+    def _infer_frame(
+        self, frame: np.ndarray, _frame_index: int
+    ) -> tuple[list, FrameMetrics]:
+        detections = self._detector.detect(frame)
+        tracks     = self._tracker.update(detections)
+        with self._analytics_lock:
+            metrics = self._analytics.update(tracks)
+        self._apply_crossing_flash(metrics)
+        return tracks, metrics
 
     def _process_demo_frame(self) -> tuple[bytes, FrameMetrics]:
         frame, detections = self._demo_gen.generate()
         tracks   = self._tracker.update(detections)
         metrics  = self._analytics.update(tracks)
-        if metrics.crossings:
-            for c in metrics.crossings:
-                lname = c.get("line_name") if isinstance(c, dict) else getattr(c, "line_name", None)
-                tid = c.get("track_id") if isinstance(c, dict) else getattr(c, "track_id", None)
-                if lname:
-                    self._line_flash[lname] = 8
-                if tid is not None:
-                    self._crossed_flash[tid] = 10
-        annotated = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
+        self._apply_crossing_flash(metrics)
+        annotated = self._draw(frame, tracks, metrics, in_place=True) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
 
     def _process_live_frame(
         self, frame: np.ndarray, _frame_index: int
     ) -> tuple[bytes, FrameMetrics]:
-        detections = self._detector.detect(frame)
-        tracks     = self._tracker.update(detections)
-        metrics    = self._analytics.update(tracks)
-        if metrics.crossings:
-            for c in metrics.crossings:
-                lname = c.get("line_name") if isinstance(c, dict) else getattr(c, "line_name", None)
-                tid = c.get("track_id") if isinstance(c, dict) else getattr(c, "track_id", None)
-                if lname:
-                    self._line_flash[lname] = 8
-                if tid is not None:
-                    self._crossed_flash[tid] = 10
-        annotated  = self._draw(frame, tracks, metrics) if self.config.draw_annotations else frame
+        tracks, metrics = self._infer_frame(frame, _frame_index)
+        annotated = self._draw(frame, tracks, metrics, in_place=True) if self.config.draw_annotations else frame
         return self._encode_jpeg(annotated), metrics
 
     # ── Live line editing ─────────────────────────────────────────────────────
@@ -401,19 +523,26 @@ class Pipeline:
     def set_lines(self, counting_lines: list[CountingLineSpec] | None = None) -> None:
         """Update counting lines on a running pipeline (interactive editor)."""
         if counting_lines is not None:
-            self.config.counting_lines = list(counting_lines)
-            if self._analytics is not None:
-                self._analytics.set_line_specs(counting_lines)
+            with self._analytics_lock:
+                self.config.counting_lines = list(counting_lines)
+                if self._analytics is not None:
+                    self._analytics.set_line_specs(counting_lines)
 
     # ── Annotation ────────────────────────────────────────────────────────────
 
     def _draw(
-        self, frame: np.ndarray, tracks: list, metrics: FrameMetrics
+        self,
+        frame: np.ndarray,
+        tracks: list,
+        metrics: FrameMetrics,
+        *,
+        in_place: bool = False,
     ) -> np.ndarray:
-        out = frame.copy()
+        out = frame if in_place else frame.copy()
+        id_mode = self.config.count_mode == "id"
 
         # Draw each counting line with its label and live count (flashing on crossing)
-        for idx, spec in enumerate(self.config.counting_lines):
+        for idx, spec in enumerate([] if id_mode else self.config.counting_lines):
             is_flashing = self._line_flash.get(spec.name, 0) > 0
             if is_flashing:
                 self._line_flash[spec.name] -= 1
@@ -435,12 +564,15 @@ class Pipeline:
 
         # Draw track boxes and tracking centroids
         speed_map = {t["id"]: t.get("speed_kmh") for t in metrics.tracks}
+        in_frame_motors = 0
         for track in tracks:
+            if getattr(track, "class_name", "") == "motorcycle":
+                in_frame_motors += 1
             x1, y1, x2, y2 = [int(v) for v in track.bbox]
             is_counted = self._crossed_flash.get(track.track_id, 0) > 0
             if is_counted:
                 self._crossed_flash[track.track_id] -= 1
-                color = (0, 255, 0)      # neon green highlight on crossed vehicle
+                color = (0, 255, 0)      # neon green highlight on counted vehicle
                 box_thick = 3
                 hit_badge = " [COUNTED]"
             else:
@@ -450,7 +582,7 @@ class Pipeline:
 
             cv2.rectangle(out, (x1, y1), (x2, y2), color, box_thick)
 
-            # Draw vehicle tracking centroid dot (gives instant visual proof when center touches line)
+            # Draw vehicle tracking centroid dot
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
             cv2.circle(out, (cx, cy), 3, (0, 255, 255), -1)
             cv2.circle(out, (cx, cy), 4, (0, 0, 0), 1)
@@ -464,9 +596,10 @@ class Pipeline:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
         # HUD overlay
+        motor_total = metrics.count_per_class.get("motorcycle", 0)
         hud = [
-            f"Count: {metrics.total_count}",
-            f"In frame: {metrics.vehicles_in_frame}",
+            f"Count ({'per ID' if id_mode else 'per line'}): {metrics.total_count} (Motor: {motor_total})",
+            f"In frame: {metrics.vehicles_in_frame} (Motor: {in_frame_motors})",
             f"Avg speed: {metrics.avg_speed_kmh:.1f} km/h",
         ]
         for i, line in enumerate(hud):
@@ -493,7 +626,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source", default="0",
                         help="Video file, webcam index, RTSP URL, or 'demo'")
     parser.add_argument("--model", default=None)
-    parser.add_argument("--conf", type=float, default=0.35)
+    parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--skip", type=int, default=0)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--no-display", action="store_true")

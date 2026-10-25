@@ -77,12 +77,6 @@ function ControlRail({ status, connected, onRefresh, latest }) {
           <ClassBreakdown latest={latest} />
         </div>
       </div>
-
-      <div className="px-5 py-4 border-t border-lane-dim/30">
-        <p className="font-code text-[10px] text-pip tracking-widest uppercase">
-          Tangerang Regency - Transport Dept
-        </p>
-      </div>
     </aside>
   )
 }
@@ -142,10 +136,11 @@ export default function App() {
   }
 
   const { status, refresh } = usePipelineStatus()
-  const { connected, metrics } = useMetricsStream(true)
-  const { latest, history } = metrics
-
   const pipelineRunning = status?.running ?? false
+  const { connected, metrics } = useMetricsStream(pipelineRunning)
+  const { latest } = metrics
+
+  const countMode = status?.count_mode || 'line'
 
   // Persistent history (SQLite) — refreshed on mount, every 30 s,
   // and whenever detection stops (session close) — never resets.
@@ -191,7 +186,12 @@ export default function App() {
           <div className="mb-2">
             <StatsCards latest={latest} perMinute={perMinute} pipelineStatus={status} />
           </div>
-          <VideoFeed enabled={pipelineRunning} prerollPct={status?.preroll_pct} />
+          <VideoFeed
+            enabled={pipelineRunning}
+            prerollPct={status?.preroll_pct}
+            countMode={countMode}
+            onCountModeChange={refresh}
+          />
         </section>
 
         {/* Live traffic chart — time horizontal, vehicles vertical */}
@@ -209,7 +209,7 @@ export default function App() {
         {/* Vehicle Timestamp — live feed */}
         <section>
           <RailTitle>Vehicle Timestamp Feed</RailTitle>
-          <VehicleTimestampFeed latest={latest} />
+          <VehicleTimestampFeed latest={latest} countMode={countMode} />
         </section>
       </main>
     </div>

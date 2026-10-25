@@ -1,7 +1,7 @@
 /**
  * useWebSocket — manages separate WebSocket connections for video and metrics.
  *
- * Video WS  → binary JPEG frames  → objectURL on a canvas ref
+ * Video WS  → binary JPEG frames  → ImageBitmap on a canvas ref
  * Metrics WS → JSON text frames   → parsed MetricsMessage state
  *
  * Reconnects automatically with exponential backoff on unexpected close.
@@ -61,35 +61,48 @@ export function useVideoStream(canvasRef, enabled = true) {
     const ws = new WebSocket(`${BASE_WS}/ws/video`)
     ws.binaryType = 'blob'
 
-    // Low-latency render: keeps video synchronized with metrics feed (<50ms latency)
-    // so vehicle crossings on video match the count metrics at the exact same instant.
-    let currentBmp = null
+    let readyBmp = null
     let rafId = 0
     let stale = false
     let pendingBlob = null
     let isDecoding = false
+    let cachedCanvas = null
+    let cachedCtx = null
 
-    const drawFrame = (blob) => {
+    const paintToCanvas = () => {
+      rafId = 0
+      if (stale || !readyBmp) return
+      const bmp = readyBmp
+      readyBmp = null
+      const canvas = canvasRef.current
+      if (canvas) {
+        if (canvas !== cachedCanvas) {
+          cachedCanvas = canvas
+          cachedCtx = canvas.getContext('2d', { alpha: false, desynchronized: true })
+        }
+        if (canvas.width !== bmp.width) canvas.width = bmp.width
+        if (canvas.height !== bmp.height) canvas.height = bmp.height
+        if (cachedCtx) cachedCtx.drawImage(bmp, 0, 0)
+      }
+      bmp.close()
+    }
+
+    const decodeNext = (blob) => {
       if (!blob || stale || isDecoding) return
       isDecoding = true
       createImageBitmap(blob)
         .then((bmp) => {
           isDecoding = false
           if (stale) { bmp.close(); return }
-          if (currentBmp) currentBmp.close()
-          currentBmp = bmp
-          const canvas = canvasRef.current
-          if (canvas) {
-            if (canvas.width !== bmp.width) canvas.width = bmp.width
-            if (canvas.height !== bmp.height) canvas.height = bmp.height
-            const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true })
-            if (ctx) ctx.drawImage(bmp, 0, 0)
+          if (readyBmp) readyBmp.close()
+          readyBmp = bmp
+          if (!rafId) {
+            rafId = requestAnimationFrame(paintToCanvas)
           }
-          // If a newer frame arrived while decoding, draw it immediately
           if (pendingBlob) {
             const next = pendingBlob
             pendingBlob = null
-            drawFrame(next)
+            decodeNext(next)
           }
         })
         .catch(() => {
@@ -101,9 +114,9 @@ export function useVideoStream(canvasRef, enabled = true) {
     ws.onclose = () => {
       setConnected(false)
       stale = true
-      cancelAnimationFrame(rafId)
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0 }
       pendingBlob = null
-      if (currentBmp) { currentBmp.close(); currentBmp = null }
+      if (readyBmp) { readyBmp.close(); readyBmp = null }
       onClose()
     }
     ws.onerror = () => { ws.close() }
@@ -111,9 +124,8 @@ export function useVideoStream(canvasRef, enabled = true) {
     ws.onmessage = (e) => {
       if (canvasRef.current && e.data instanceof Blob) {
         if (!isDecoding) {
-          drawFrame(e.data)
+          decodeNext(e.data)
         } else {
-          // Keep newest frame, drop intermediate to stay at real-time live edge
           pendingBlob = e.data
         }
       }
@@ -130,6 +142,7 @@ export function useVideoStream(canvasRef, enabled = true) {
 // ── Metrics WebSocket ──────────────────────────────────────────────────────────
 
 const METRICS_HISTORY = 60   // keep last 60 data points for charts
+const UI_THROTTLE_MS  = 180  // throttle non-crossing UI state updates to ~5.5 Hz
 
 const DEFAULT_METRICS = {
   latest: null,               // most recent MetricsMessage
@@ -143,22 +156,65 @@ export function useMetricsStream(enabled = true) {
 
   const connectFn = useCallback(({ onClose, onOpen }) => {
     const ws = new WebSocket(`${BASE_WS}/ws/metrics`)
+    let lastCommitTime = 0
+    let throttleTimer = null
+    let pendingMsg = null
+    let queuedCrossings = []
+    let queuedAlerts = []
+
+    const flushPending = () => {
+      if (throttleTimer) {
+        clearTimeout(throttleTimer)
+        throttleTimer = null
+      }
+      if (!pendingMsg) return
+      const msg = pendingMsg
+      const mergedCrossings = queuedCrossings
+      const mergedAlerts = queuedAlerts
+      pendingMsg = null
+      queuedCrossings = []
+      queuedAlerts = []
+      lastCommitTime = performance.now()
+
+      const finalMsg = mergedCrossings.length !== (msg.crossings?.length ?? 0)
+        ? { ...msg, crossings: mergedCrossings }
+        : msg
+
+      setMetrics(prev => {
+        const history = [...prev.history, finalMsg].slice(-METRICS_HISTORY)
+        const newAlerts = mergedAlerts.length
+          ? [...prev.alerts, ...mergedAlerts].slice(-50)
+          : prev.alerts
+        return { latest: finalMsg, history, alerts: newAlerts }
+      })
+    }
 
     ws.onopen = () => { setConnected(true); onOpen() }
-    ws.onclose = (e) => { setConnected(false); onClose(e.wasClean) }
+    ws.onclose = (e) => {
+      if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null }
+      setConnected(false)
+      onClose(e.wasClean)
+    }
     ws.onerror = () => { ws.close() }
 
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data)
-        if (msg.type === 'ping') return   // filter heartbeat pings
-        setMetrics(prev => {
-          const history = [...prev.history, msg].slice(-METRICS_HISTORY)
-          const newAlerts = msg.alerts?.length
-            ? [...prev.alerts, ...msg.alerts].slice(-50)
-            : prev.alerts
-          return { latest: msg, history, alerts: newAlerts }
-        })
+        if (msg.type === 'ping') return
+        pendingMsg = msg
+        if (msg.crossings?.length) {
+          queuedCrossings.push(...msg.crossings)
+        }
+        if (msg.alerts?.length) {
+          queuedAlerts.push(...msg.alerts)
+        }
+
+        const now = performance.now()
+        if (msg.crossings?.length > 0 || now - lastCommitTime >= UI_THROTTLE_MS) {
+          flushPending()
+        } else if (!throttleTimer) {
+          throttleTimer = setTimeout(flushPending, UI_THROTTLE_MS - (now - lastCommitTime))
+        }
       } catch {
         // ignore malformed frames
       }

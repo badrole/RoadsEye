@@ -2,25 +2,36 @@ import { useEffect, useState } from 'react'
 
 /**
  * KpiStrip — compact stat row above the CCTV feed.
- * Uptime = start→now wallclock, live ticking seconds.
+ * Shows total vehicles (by active mode), motorcycles counted, in-frame vehicles,
+ * per-minute rate, average speed, and live uptime clock.
  */
 export default function StatsCards({ latest, perMinute = [], pipelineStatus }) {
   const running  = pipelineStatus?.running ?? false
   const upSec    = pipelineStatus?.uptime_seconds ?? null
   const thisMinute = perMinute.length ? perMinute[perMinute.length - 1].vehicles : null
+  const inFrameMotors = Array.isArray(latest?.tracks)
+    ? latest.tracks.filter(t => t.class_name === 'motorcycle').length
+    : 0
+
   const cards = [
-    { label: 'TOTAL',       value: latest?.total_count ?? '—',      color: 'text-lane',  icon: 'car' },
-    { label: 'PER MINUTE',  value: thisMinute ?? '—',               color: 'text-chalk', icon: 'radar' },
-    { label: 'AVG KM/H',    value: latest?.avg_speed_kmh != null ? latest.avg_speed_kmh.toFixed(1) : '—', color: 'text-lane', icon: 'speed' },
-    { label: 'START → NOW', value: null, color: 'text-chalk', icon: 'clock', clock: true },
+    {
+      label: 'IN FRAME',
+      value: latest != null
+        ? `${latest.vehicles_in_frame ?? 0}${inFrameMotors > 0 ? ` (${inFrameMotors} mtr)` : ''}`
+        : '—',
+      color: 'text-chalk',
+      icon: 'frame',
+    },
+    { label: 'PER MINUTE',      value: thisMinute ?? '—',           color: 'text-chalk', icon: 'radar' },
+    { label: 'AVG KM/H',        value: latest?.avg_speed_kmh != null ? latest.avg_speed_kmh.toFixed(1) : '—', color: 'text-lane', icon: 'speed' },
+    { label: 'START → NOW',     value: null, color: 'text-chalk', icon: 'clock', clock: true },
   ]
 
   const ICONS = {
-    car: (
+    frame: (
       <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-        <path d="M5 17h14M6 17l-1-5h14l-1 5M7 9l1.5-3.5h7L17 9M7 9h10a2 2 0 012 2v1H5v-1a2 2 0 012-2z" />
-        <circle cx="8" cy="18.5" r="1.2" fill="currentColor" />
-        <circle cx="16" cy="18.5" r="1.2" fill="currentColor" />
+        <path d="M4 8V5a1 1 0 011-1h3M20 8V5a1 1 0 00-1-1h-3M4 16v3a1 1 0 001 1h3M20 16v3a1 1 0 01-1 1h-3" strokeLinecap="round" />
+        <circle cx="12" cy="12" r="2.5" />
       </svg>
     ),
     radar: (

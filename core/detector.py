@@ -34,6 +34,9 @@ COCO_TRAFFIC_CLASSES: dict[int, int] = {
 
 CLASS_NAMES: list[str] = ["car", "bus", "motorcycle", "truck"]
 
+_COCO_IDS = np.array(list(COCO_TRAFFIC_CLASSES.keys()))
+_TRAFFIC_IDS = np.array(list(COCO_TRAFFIC_CLASSES.values()))
+
 # Default ONNX model path — override via MODEL_PATH env var
 DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "models" / "weights" / "yolov8s_traffic.onnx"
 
@@ -169,9 +172,8 @@ class Detector:
             cv2.BORDER_CONSTANT, value=(114, 114, 114),
         )
 
-        # BGR → RGB, HWC → CHW, [0,255] → [0,1]
-        rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-        blob = (rgb.transpose(2, 0, 1).astype(np.float32) / 255.0)[np.newaxis]
+        # BGR → RGB, HWC → NCHW, [0,255] → [0,1] in a single native pass
+        blob = cv2.dnn.blobFromImage(padded, 1.0 / 255.0, swapRB=True)
         return blob, scale, (pad_w, pad_h)
 
     def _postprocess(
@@ -188,95 +190,50 @@ class Detector:
         where 8 = [cx, cy, w, h, cls0_score, cls1_score, cls2_score, cls3_score]
         """
         # output: (1, num_attrs, num_anchors) → transpose to (num_anchors, num_attrs)
-        preds = output[0].T  # (num_anchors, 8)
+        preds = output[0].T
+        cls_scores = preds[:, 4:]
+        rows = np.arange(len(preds))
+
+        if cls_scores.shape[1] >= 80:
+            # Best traffic class per anchor. Specificity gate: the anchor's overall
+            # argmax across all 80 COCO classes must itself be a traffic class, so
+            # a "person" that also scores on a vehicle column is rejected.
+            sub = cls_scores[:, _COCO_IDS]
+            best_col = sub.argmax(axis=1)
+            conf = sub[rows, best_col]
+            conf = np.where(np.isin(cls_scores.argmax(axis=1), _COCO_IDS), conf, 0.0)
+            cls = _TRAFFIC_IDS[best_col]
+        else:
+            cls = cls_scores.argmax(axis=1)
+            conf = cls_scores[rows, cls]
+
+        keep = conf >= self.confidence_threshold
+        if not keep.any():
+            return []
+        p, conf, cls = preds[keep], conf[keep], cls[keep]
 
         pad_w, pad_h = pad
-        detections: list[Detection] = []
-        boxes_for_nms: list[list[float]] = []
-        scores_for_nms: list[float] = []
-        class_ids: list[int] = []
+        half_w, half_h = p[:, 2] / 2, p[:, 3] / 2
+        x1 = np.clip((p[:, 0] - half_w - pad_w) / scale, 0, orig_w)
+        y1 = np.clip((p[:, 1] - half_h - pad_h) / scale, 0, orig_h)
+        x2 = np.clip((p[:, 0] + half_w - pad_w) / scale, 0, orig_w)
+        y2 = np.clip((p[:, 1] + half_h - pad_h) / scale, 0, orig_h)
+        boxes = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1)  # xywh for NMSBoxes
 
-        num_classes = preds.shape[1] - 4
-        is_coco = num_classes >= 80
-
-        # Vectorized pre-filter: drop anchors below confidence before the Python loop
-        cls_scores = preds[:, 4:]
-        if is_coco:
-            coco_cols = list(COCO_TRAFFIC_CLASSES.keys())
-            best_conf = cls_scores[:, coco_cols].max(axis=1)
-            # Specificity gate: the winning traffic class must also dominate ALL
-            # 80 COCO classes — a "person" or other object that happens to score
-            # on a vehicle column is rejected instead of mislabelled.
-            overall_best = cls_scores.max(axis=1)
-            best_conf = np.minimum(best_conf, np.where(
-                np.isin(np.argmax(cls_scores, axis=1), coco_cols), overall_best, 0.0
-            ))
-        else:
-            best_conf = cls_scores.max(axis=1)
-        preds = preds[best_conf >= self.confidence_threshold]
-
-        for pred in preds:
-            cx, cy, w, h = pred[:4]
-            class_scores = pred[4:]
-
-            if is_coco:
-                # Find best score among traffic classes (car=2, bus=5, motorcycle=3, truck=7)
-                best_cls = -1
-                best_conf = -1.0
-                for coco_id, traffic_id in COCO_TRAFFIC_CLASSES.items():
-                    if class_scores[coco_id] > best_conf:
-                        best_conf = float(class_scores[coco_id])
-                        best_cls = traffic_id
-                # Specificity: reject when another COCO class outscores the
-                # vehicle interpretation (kills phantom vehicles).
-                if float(class_scores.max()) > best_conf + 1e-9 and int(np.argmax(class_scores)) not in COCO_TRAFFIC_CLASSES:
-                    continue
-                confidence = best_conf
-                class_id = best_cls
-            else:
-                class_id = int(np.argmax(class_scores))
-                confidence = float(class_scores[class_id])
-
-            if confidence < self.confidence_threshold or class_id < 0:
-                continue
-
-            # Convert from padded/scaled coords back to original frame coords
-            x1 = (cx - w / 2 - pad_w) / scale
-            y1 = (cy - h / 2 - pad_h) / scale
-            x2 = (cx + w / 2 - pad_w) / scale
-            y2 = (cy + h / 2 - pad_h) / scale
-
-            # Clamp to frame bounds
-            x1 = max(0.0, min(float(orig_w), x1))
-            y1 = max(0.0, min(float(orig_h), y1))
-            x2 = max(0.0, min(float(orig_w), x2))
-            y2 = max(0.0, min(float(orig_h), y2))
-
-            boxes_for_nms.append([x1, y1, x2 - x1, y2 - y1])  # xywh for cv2.dnn.NMSBoxes
-            scores_for_nms.append(confidence)
-            class_ids.append(class_id)
-
-        if not boxes_for_nms:
-            return []
-
-        # NMS
         indices = cv2.dnn.NMSBoxes(
-            boxes_for_nms, scores_for_nms, self.confidence_threshold, self.iou_threshold
+            boxes.tolist(), conf.tolist(), self.confidence_threshold, self.iou_threshold
         )
         if indices is None or len(indices) == 0:
             return []
 
-        for i in indices.flatten():
-            x1, y1, w, h = boxes_for_nms[i]
-            detections.append(
-                Detection(
-                    bbox=(x1, y1, x1 + w, y1 + h),
-                    confidence=scores_for_nms[i],
-                    class_id=class_ids[i],
-                )
+        return [
+            Detection(
+                bbox=(float(x1[i]), float(y1[i]), float(x2[i]), float(y2[i])),
+                confidence=float(conf[i]),
+                class_id=int(cls[i]),
             )
-
-        return detections
+            for i in np.asarray(indices).flatten()
+        ]
 
     def __repr__(self) -> str:
         return (

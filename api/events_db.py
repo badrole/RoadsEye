@@ -228,18 +228,18 @@ def write_events(batch: list[dict]) -> int:
 
 
 class EventWriter:
-    """In-memory event buffer with periodic autosave and mandatory flush on disconnect.
+    """In-memory event buffer with background thread persistence.
 
-    Events are appended in memory without touching disk continuously during live video.
-    Autosave commits all buffered events every 15 minutes (900 seconds) or when
-    flush() is called explicitly on disconnect/stop.
+    Events are appended in memory in O(1) without blocking the asyncio loop;
+    the background thread commits buffered events promptly to SQLite.
     """
 
-    AUTOSAVE_INTERVAL_SECONDS = 1.0   # 1 second auto-persist to SQLite
+    AUTOSAVE_INTERVAL_SECONDS = 1.0
 
     def __init__(self) -> None:
         self._buffer: list[dict] = []
         self._lock = threading.Lock()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._running: bool = False
         self._last_flush_time: float = time.time()
@@ -254,19 +254,16 @@ class EventWriter:
         self._thread.start()
 
     def enqueue(self, record: dict[str, Any] | None) -> None:
-        """Enqueue an event in memory and persist promptly to disk."""
+        """Enqueue an event in memory and signal background writer thread."""
         if record is None:
             return
-        should_flush = False
         with self._lock:
             if len(self._buffer) >= _QUEUE_MAX:
                 self.dropped += 1
             else:
                 self._buffer.append(record)
                 if len(self._buffer) >= 5:
-                    should_flush = True
-        if should_flush:
-            self.flush()
+                    self._wake.set()
 
     def flush(self) -> int:
         """Mandatory flush of buffered events to SQLite (autosave & disconnect)."""
@@ -281,15 +278,16 @@ class EventWriter:
     def stop(self, timeout: float = 10.0) -> None:
         """Stop writer and ensure all pending events are committed to disk."""
         self._running = False
+        self._wake.set()
         self.flush()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
 
     def _run(self) -> None:
         while self._running:
-            time.sleep(1.0)
-            now = time.time()
-            if now - self._last_flush_time >= self.AUTOSAVE_INTERVAL_SECONDS:
+            self._wake.wait(timeout=self.AUTOSAVE_INTERVAL_SECONDS)
+            self._wake.clear()
+            if self._buffer:
                 self.flush()
 
     def _write_with_retry(self, batch: list[dict]) -> int:

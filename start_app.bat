@@ -105,7 +105,7 @@ powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000,3000 -State
 
 :: -- 5. Jalankan backend + frontend di jendela terpisah --------------------
 echo [4/5] Menjalankan Backend API RoadsEye - Port 8000...
-start "RoadsEye - Backend" /d "%PROJECT_DIR%" cmd /k "title RoadsEye - Backend (Port 8000) & "%PROJECT_DIR%\venv\Scripts\python.exe" -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir api --reload-dir core"
+start "RoadsEye - Backend" /d "%PROJECT_DIR%" cmd /k "title RoadsEye - Backend (Port 8000) & "%PROJECT_DIR%\venv\Scripts\python.exe" -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --no-access-log"
 
 echo       Menjalankan Frontend Dashboard RoadsEye - Port 3000...
 start "RoadsEye - Frontend" /d "%PROJECT_DIR%\dashboard" cmd /k "title RoadsEye - Frontend (Port 3000) & npm run dev"
