@@ -35,6 +35,7 @@ class PipelineConfig:
     input_size: int = 640
     skip_frames: int = 0
     counting_lines: list[CountingLineSpec] = field(default_factory=list)
+    counting_zone: list[tuple[int, int]] = field(default_factory=list)
     pixels_per_meter: float = 10.0
     loop: bool = False
     draw_annotations: bool = True
@@ -130,12 +131,13 @@ class Pipeline:
 
         self._tracker = Tracker(
             frame_rate=int(fps),
-            track_activation_threshold=0.25,
-            lost_track_buffer=30,
+            track_activation_threshold=0.20,
+            lost_track_buffer=45,
             minimum_matching_threshold=0.8,
         )
         self._analytics = AnalyticsEngine(
             counting_lines=cfg.counting_lines or [],
+            counting_zone=cfg.counting_zone or [],
             pixels_per_meter=cfg.pixels_per_meter,
             fps=fps,
         )
@@ -528,6 +530,21 @@ class Pipeline:
                 if self._analytics is not None:
                     self._analytics.set_line_specs(counting_lines)
 
+    @property
+    def zone_points(self) -> list[tuple[int, int]]:
+        if self._analytics is not None:
+            return self._analytics.zone_points
+        return list(self.config.counting_zone)
+
+    def set_zone(self, counting_zone: list[tuple[int, int]] | None = None) -> None:
+        """Update Per-ID counting zone polygon on a running pipeline."""
+        if counting_zone is not None:
+            pts = [(int(round(p[0])), int(round(p[1]))) for p in counting_zone]
+            with self._analytics_lock:
+                self.config.counting_zone = pts
+                if self._analytics is not None:
+                    self._analytics.set_zone(pts)
+
     # ── Annotation ────────────────────────────────────────────────────────────
 
     def _draw(
@@ -540,6 +557,32 @@ class Pipeline:
     ) -> np.ndarray:
         out = frame if in_place else frame.copy()
         id_mode = self.config.count_mode == "id"
+
+        # Draw Per-ID counting zone polygon when in ID mode
+        if id_mode and len(self.config.counting_zone) >= 3:
+            pts = np.array(self.config.counting_zone, dtype=np.int32).reshape((-1, 1, 2))
+            is_zone_flashing = self._line_flash.get("ID", 0) > 0
+            if is_zone_flashing:
+                self._line_flash["ID"] -= 1
+                z_color = (0, 255, 0)
+                z_thick = 3
+                z_tag = " [COUNTED!]"
+            else:
+                z_color = (238, 211, 34)   # cyan-yellow BGR
+                z_thick = 2
+                z_tag = ""
+
+            overlay = out.copy()
+            cv2.fillPoly(overlay, [pts], z_color)
+            cv2.addWeighted(overlay, 0.12, out, 0.88, 0, out)
+            cv2.polylines(out, [pts], isClosed=True, color=z_color, thickness=z_thick)
+
+            zx, zy = int(self.config.counting_zone[0][0]), int(self.config.counting_zone[0][1])
+            z_label = f"ZONA HITUNG (ID): {metrics.total_count}{z_tag}"
+            cv2.putText(out, z_label, (zx + 8, max(24, zy + 22)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 3)
+            cv2.putText(out, z_label, (zx + 8, max(24, zy + 22)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, z_color, 2)
 
         # Draw each counting line with its label and live count (flashing on crossing)
         for idx, spec in enumerate([] if id_mode else self.config.counting_lines):

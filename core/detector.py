@@ -13,7 +13,6 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 import cv2
 import numpy as np
@@ -226,7 +225,7 @@ class Detector:
         if indices is None or len(indices) == 0:
             return []
 
-        return [
+        dets = [
             Detection(
                 bbox=(float(x1[i]), float(y1[i]), float(x2[i]), float(y2[i])),
                 confidence=float(conf[i]),
@@ -234,6 +233,62 @@ class Detector:
             )
             for i in np.asarray(indices).flatten()
         ]
+        return self._suppress_nested_vehicles(dets)
+
+    @staticmethod
+    def _suppress_nested_vehicles(detections: list[Detection]) -> list[Detection]:
+        """Suppress stacked/nested boxes on the same four-wheeled vehicle (e.g. partial
+        'bus' box inside a full 'truck' box) while leaving motorcycles untouched."""
+        if len(detections) < 2:
+            return detections
+
+        suppressed = [False] * len(detections)
+        for i in range(len(detections)):
+            if suppressed[i] or detections[i].class_id == 2:
+                continue
+            ax1, ay1, ax2, ay2 = detections[i].bbox
+            a_area = detections[i].area
+            if a_area <= 0:
+                continue
+
+            for j in range(i + 1, len(detections)):
+                if suppressed[j] or detections[j].class_id == 2:
+                    continue
+                bx1, by1, bx2, by2 = detections[j].bbox
+                b_area = detections[j].area
+                if b_area <= 0:
+                    continue
+
+                ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+                ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue
+
+                inter = (ix2 - ix1) * (iy2 - iy1)
+                min_area = min(a_area, b_area)
+                if inter / min_area < 0.65:
+                    continue
+
+                if a_area >= b_area:
+                    big_idx, small_idx = i, j
+                    big_area, small_area = a_area, b_area
+                else:
+                    big_idx, small_idx = j, i
+                    big_area, small_area = b_area, a_area
+
+                big_det = detections[big_idx]
+                small_det = detections[small_idx]
+                if big_area >= 1.25 * small_area and big_det.confidence >= small_det.confidence - 0.18:
+                    suppressed[small_idx] = True
+                elif small_det.confidence > big_det.confidence:
+                    suppressed[big_idx] = True
+                else:
+                    suppressed[small_idx] = True
+
+                if suppressed[i]:
+                    break
+
+        return [d for idx, d in enumerate(detections) if not suppressed[idx]]
 
     def __repr__(self) -> str:
         return (

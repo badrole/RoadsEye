@@ -20,6 +20,9 @@ from api.schemas import (
     LinesUpdateRequest,
     PipelineStartRequest,
     PipelineStatus,
+    ZonePoint,
+    ZoneResponse,
+    ZoneUpdateRequest,
 )
 from core.pipeline import PipelineConfig
 
@@ -75,16 +78,34 @@ def _status_lines(content) -> list:
 
 @router.get("/pipeline/lines", response_model=LinesResponse)
 async def get_lines() -> LinesResponse:
-    """Current counting line geometry (interactive editor hydration)."""
-    return LinesResponse(counting_lines=manager.status().counting_lines)
+    """Current counting line and Per-ID zone geometry (interactive editor hydration)."""
+    st = manager.status()
+    return LinesResponse(counting_lines=st.counting_lines, counting_zone=st.counting_zone)
 
 
 @router.post("/pipeline/lines", response_model=LinesResponse)
 async def update_lines(req: LinesUpdateRequest) -> LinesResponse:
-    """Update counting lines live — persists whether pipeline is running or idle."""
+    """Update counting lines (and optionally counting zone) live."""
     counting = [c.as_spec() for c in req.counting_lines]
     manager.set_lines(counting_lines=counting)
-    return LinesResponse(counting_lines=_status_lines(counting))
+    if req.counting_zone is not None:
+        manager.set_zone([(p.x, p.y) for p in req.counting_zone])
+    st = manager.status()
+    return LinesResponse(counting_lines=_status_lines(counting), counting_zone=st.counting_zone)
+
+
+@router.get("/pipeline/zone", response_model=ZoneResponse)
+async def get_zone() -> ZoneResponse:
+    """Current Per-ID counting zone polygon."""
+    return ZoneResponse(counting_zone=manager.status().counting_zone)
+
+
+@router.post("/pipeline/zone", response_model=ZoneResponse)
+async def update_zone(req: ZoneUpdateRequest) -> ZoneResponse:
+    """Update Per-ID counting zone polygon live."""
+    pts = [(p.x, p.y) for p in req.counting_zone]
+    manager.set_zone(pts)
+    return ZoneResponse(counting_zone=[ZonePoint(x=p[0], y=p[1]) for p in pts])
 
 
 @router.get("/pipeline/count-mode", response_model=CountModeResponse)

@@ -232,6 +232,12 @@ class CountingLineStatus(BaseModel):
     y2: int
 
 
+class ZonePoint(BaseModel):
+    """A vertex (x, y) of the Per-ID counting zone polygon."""
+    x: int
+    y: int
+
+
 class PipelineStatus(BaseModel):
     running: bool
     source: str | int | None = None
@@ -242,6 +248,7 @@ class PipelineStatus(BaseModel):
     preroll_pct: int | None = None   # 0-99 while the pre-roll buffer downloads
     count_mode: Literal["line", "id"] = "line"
     counting_lines: list[CountingLineStatus] = Field(default_factory=list)
+    counting_zone: list[ZonePoint] = Field(default_factory=list)
 
 
 class CountModeRequest(BaseModel):
@@ -256,11 +263,23 @@ class CountModeResponse(BaseModel):
 class LinesUpdateRequest(BaseModel):
     """POST /pipeline/lines — live geometry update for interactive editor."""
     counting_lines: list[CountingLineConfig] = Field(default_factory=list)
+    counting_zone: list[ZonePoint] | None = None
 
 
 class LinesResponse(BaseModel):
     """GET /pipeline/lines."""
     counting_lines: list[CountingLineStatus] = Field(default_factory=list)
+    counting_zone: list[ZonePoint] = Field(default_factory=list)
+
+
+class ZoneUpdateRequest(BaseModel):
+    """POST /pipeline/zone — update Per-ID counting zone polygon live."""
+    counting_zone: list[ZonePoint] = Field(default_factory=list)
+
+
+class ZoneResponse(BaseModel):
+    """GET /pipeline/zone."""
+    counting_zone: list[ZonePoint] = Field(default_factory=list)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ import uuid
 from collections import deque
 
 from core.pipeline import Pipeline, PipelineConfig
-from api.schemas import CountingLineStatus, MetricsMessage, PipelineStatus
+from api.schemas import CountingLineStatus, MetricsMessage, PipelineStatus, ZonePoint
 
 # Max frames queued for WebSocket consumers; older frames are dropped when full
 _VIDEO_QUEUE_MAXSIZE = 2
@@ -44,9 +44,11 @@ class PipelineManager:
         self._metrics_queues: list[asyncio.Queue[MetricsMessage]] = []
 
         self._lock = asyncio.Lock()
-        # Default counting lines (fallback when stopped / hydration before start)
+        # Default counting lines and Per-ID counting zone
         self._default_lines = []
+        self._default_zone: list[tuple[int, int]] = []
         self._load_default_lines()
+        self._load_default_zone()
         self._last_sheets_sync_time: float = 0.0
         self._preroll_pct: int | None = None   # 0-99 while the timeshift buffer fills
         self._stream_delay = max(0.0, float(os.environ.get("STREAM_DELAY_SECONDS", "0") or 0))
@@ -79,6 +81,24 @@ class PipelineManager:
         if not self._default_lines:
             self._default_lines = [CountingLineSpec("line1", (0, 380), (1280, 380))]
 
+    def _load_default_zone(self) -> None:
+        import json
+        import os
+        from core.analytics import DEFAULT_COUNTING_ZONE
+        raw = os.environ.get("COUNTING_ZONE", "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                for pt in parsed:
+                    if isinstance(pt, dict):
+                        self._default_zone.append((int(pt["x"]), int(pt["y"])))
+                    elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                        self._default_zone.append((int(pt[0]), int(pt[1])))
+            except Exception:
+                pass
+        if len(self._default_zone) < 3:
+            self._default_zone = list(DEFAULT_COUNTING_ZONE)
+
     # ── Public interface ──────────────────────────────────────────────────────
 
     @property
@@ -104,15 +124,19 @@ class PipelineManager:
 
         if self._pipeline is not None:
             active_lines = self._pipeline.line_specs
-        elif self._config and self._config.counting_lines:
-            active_lines = self._config.counting_lines
+            active_zone = self._pipeline.zone_points
+        elif self._config:
+            active_lines = self._config.counting_lines or self._default_lines
+            active_zone = self._config.counting_zone or self._default_zone
         else:
             active_lines = self._default_lines
+            active_zone = self._default_zone
 
         lines  = [
             CountingLineStatus(name=s.name, x1=int(s.p1[0]), y1=int(s.p1[1]), x2=int(s.p2[0]), y2=int(s.p2[1]))
             for s in active_lines
         ]
+        zone = [ZonePoint(x=int(p[0]), y=int(p[1])) for p in active_zone]
         return PipelineStatus(
             running=self.running,
             source=self._config.source if self._config else None,
@@ -123,6 +147,7 @@ class PipelineManager:
             preroll_pct=self._preroll_pct if self.running else None,
             count_mode=self._count_mode,
             counting_lines=lines,
+            counting_zone=zone,
         )
 
     async def start(self, config: PipelineConfig) -> None:
@@ -138,6 +163,8 @@ class PipelineManager:
 
             if not config.counting_lines and self._default_lines:
                 config.counting_lines = list(self._default_lines)
+            if not config.counting_zone and self._default_zone:
+                config.counting_zone = list(self._default_zone)
 
             # Determine whether buffer delay is needed: only for remote live network streams
             src_str = str(config.source).lower()
@@ -251,6 +278,15 @@ class PipelineManager:
             self._pipeline.set_lines(
                 counting_lines=specs,
             )
+
+    def set_zone(self, counting_zone: list[tuple[int, int]] | None) -> None:
+        """Live update of Per-ID counting zone polygon."""
+        pts = [(int(round(p[0])), int(round(p[1]))) for p in (counting_zone or [])]
+        self._default_zone = pts
+        if self._config is not None:
+            self._config.counting_zone = pts
+        if self._pipeline is not None:
+            self._pipeline.set_zone(pts)
 
     # ── Queue subscription ────────────────────────────────────────────────────
 
