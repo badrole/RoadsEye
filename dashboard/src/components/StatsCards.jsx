@@ -9,16 +9,11 @@ export default function StatsCards({ latest, perMinute = [], pipelineStatus }) {
   const running  = pipelineStatus?.running ?? false
   const upSec    = pipelineStatus?.uptime_seconds ?? null
   const thisMinute = perMinute.length ? perMinute[perMinute.length - 1].vehicles : null
-  const inFrameMotors = Array.isArray(latest?.tracks)
-    ? latest.tracks.filter(t => t.class_name === 'motorcycle').length
-    : 0
 
   const cards = [
     {
       label: 'IN FRAME',
-      value: latest != null
-        ? `${latest.vehicles_in_frame ?? 0}${inFrameMotors > 0 ? ` (${inFrameMotors} mtr)` : ''}`
-        : '—',
+      value: latest != null ? (latest.vehicles_in_frame ?? 0) : '—',
       color: 'text-chalk',
       icon: 'frame',
     },

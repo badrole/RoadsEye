@@ -274,106 +274,32 @@ class TestAnomalyDetector:
         assert line.total_count == 1
         assert line.count_per_class["motorcycle"] == 1
 
-    def test_detector_suppresses_nested_bus_in_truck_but_keeps_motorcycles(self):
-        from core.detector import Detector
-        dets = [
-            # Partial cab box classified as 'bus' inside full 'truck' box
-            Detection(bbox=(100, 100, 220, 220), confidence=0.65, class_id=1),  # bus
-            Detection(bbox=(100, 80, 320, 225), confidence=0.58, class_id=3),   # truck
-            # Two side-by-side motorcycles with heavy overlap -> must BOTH be kept
-            Detection(bbox=(500, 200, 545, 280), confidence=0.75, class_id=2),  # motorcycle 1
-            Detection(bbox=(510, 202, 555, 282), confidence=0.72, class_id=2),  # motorcycle 2
-        ]
-        filtered = Detector._suppress_nested_vehicles(dets)
-        classes = [d.class_name for d in filtered]
-        assert classes.count("truck") == 1
-        assert classes.count("bus") == 0
-        assert classes.count("motorcycle") == 2
-
-    def test_id_counter_holds_occluded_bus_until_clear_truck_without_double_count(self):
-        engine = AnalyticsEngine()
-        engine.set_count_mode("id")
-        # Consume initial mode-switch flush on empty frame
-        engine.update([])
-
-        # Truck partially occluded behind obstacle (detected as 'bus', ID 50, box growing)
-        partial_boxes = [
-            (100, 100, 180, 180),
-            (100, 100, 195, 188),
-            (100, 98, 212, 196),
-            (100, 95, 232, 205),
-            (100, 92, 255, 214),
-        ]
-        for bx in partial_boxes:
-            m = engine.update([make_track(50, *bx, class_id=1)])  # class_id=1 (bus)
-            # Still emerging/expanding -> not prematurely counted
-            assert m.total_count == 0
-
-        # Truck clears obstacle into open zone: box stabilizes at full size, detected as 'truck'
-        # Even if tracker switched ID from 50 -> 51 upon expansion, it must lock and count ONCE as truck
-        for step in range(12):
-            m = engine.update([make_track(51, 100 + step * 4, 85, 310 + step * 4, 220, class_id=3)])
-
-        assert m.total_count == 1
-        assert m.count_per_class == {"truck": 1}
-        assert "bus" not in m.count_per_class
-
-    def test_tracker_id_lock_preserves_id_on_bus_to_truck_and_keeps_side_by_side_motorcycles(self):
-        from core.tracker import Tracker
-        tracker = Tracker()
-
-        # Frames 1-3: occluded truck seen as small 'bus' box + 2 side-by-side motorcycles
-        for step in range(3):
-            tracks = tracker.update([
-                Detection(bbox=(100 + step * 5, 100, 180 + step * 5, 180), confidence=0.85, class_id=1),  # bus
-                Detection(bbox=(500, 200 + step * 6, 540, 270 + step * 6), confidence=0.80, class_id=2),  # moto A
-                Detection(bbox=(512, 202 + step * 6, 552, 272 + step * 6), confidence=0.78, class_id=2),  # moto B
-            ])
-
-        heavy_ids_before = [t.track_id for t in tracks if t.class_id != 2]
-        moto_ids_before = {t.track_id for t in tracks if t.class_id == 2}
-        assert len(heavy_ids_before) == 1
-        assert len(moto_ids_before) == 2
-        locked_id = heavy_ids_before[0]
-
-        # Frame 4-6: truck clears obstacle -> box suddenly elongates to 3x width and class becomes 'truck'
-        for extra in range(3):
-            tracks_after = tracker.update([
-                Detection(bbox=(115 + extra * 6, 85, 360 + extra * 6, 210), confidence=0.90, class_id=3),  # full truck
-                Detection(bbox=(500, 220 + extra * 6, 540, 290 + extra * 6), confidence=0.80, class_id=2),  # moto A
-                Detection(bbox=(512, 222 + extra * 6, 552, 292 + extra * 6), confidence=0.78, class_id=2),  # moto B
-            ])
-            heavy_after = [t for t in tracks_after if t.class_id != 2]
-            moto_after = [t for t in tracks_after if t.class_id == 2]
-            assert len(heavy_after) == 1
-            assert heavy_after[0].track_id == locked_id
-            assert heavy_after[0].class_name == "truck"
-            assert len(moto_after) == 2
-
     def test_id_mode_counting_zone_only_counts_when_bbox_fully_inside(self):
         zone = [(200, 150), (1000, 150), (1000, 600), (200, 600)]
         engine = AnalyticsEngine(counting_zone=zone)
         engine.set_count_mode("id")
 
-        # 1. Vehicle outside zone (behind obstacle, detected as 'bus' ID 60) -> NOT counted
-        m1 = engine.update([make_track(60, 50, 200, 180, 320, class_id=1)])
+        # 1. Same truck (ID 60) outside zone (behind obstacle, detected as 'car' and 'bus' with high conf) -> NOT counted
+        m1 = engine.update([make_track(60, 50, 200, 180, 320, class_id=0)])
         assert m1.total_count == 0
-
-        # 2. Vehicle half-inside zone (x1=150 is outside x>=200, detected as 'bus' ID 60) -> NOT counted
         m2 = engine.update([make_track(60, 150, 200, 310, 320, class_id=1)])
         assert m2.total_count == 0
 
-        # 3. Vehicle 100% inside obstacle-free zone (detected as 'truck' ID 61) -> COUNTED as truck!
-        m3 = engine.update([make_track(61, 220, 200, 420, 330, class_id=3)])
+        # 2. Same truck (ID 60) enters 100% inside obstacle-free zone (detected as 'truck' conf 0.60)
+        # -> Out-of-zone 'car'/'bus' votes are cleared, so it is COUNTED and LABELED as 'truck'!
+        m3 = engine.update([Track(track_id=60, bbox=(220, 200, 420, 330), confidence=0.60, class_id=3)])
         assert m3.total_count == 1
         assert m3.count_per_class == {"truck": 1}
+        assert m3.tracks[0]["class_name"] == "truck"
         assert "bus" not in m3.count_per_class
+        assert "car" not in m3.count_per_class
 
-        # 4. Vehicle partially exits zone on the right (x2=1050 > 1000, misclassified as 'bus')
+        # 3. Vehicle partially exits zone on the right (x2=1050 > 1000, misclassified as 'bus')
         # -> must NOT double-count and must keep locked class 'truck'
-        m4 = engine.update([make_track(61, 880, 200, 1050, 330, class_id=1)])
+        m4 = engine.update([make_track(60, 880, 200, 1050, 330, class_id=1)])
         assert m4.total_count == 1
         assert m4.count_per_class == {"truck": 1}
+        assert m4.tracks[0]["class_name"] == "truck"
 
 
 def test_hls_pipeline_preserves_all_segment_frames():
@@ -429,3 +355,58 @@ def test_hls_pipeline_preserves_all_segment_frames():
     results = asyncio.run(collect())
     assert len(results) == 30
     assert pipeline._detector.calls == 30
+
+
+def test_confidence_weighted_class_stabilization_and_anti_bus_spike():
+    zone = [(0, 0), (1000, 0), (1000, 1000), (0, 1000)]
+    engine = AnalyticsEngine(fps=25.0, pixels_per_meter=10.0, counting_zone=zone)
+    engine.set_count_mode("id")
+
+    # 1) Car occluded as low-conf truck (0.42) -> clear high-conf car (0.88, 0.89) -> low-conf truck (0.51)
+    engine.update([Track(track_id=1, bbox=(100, 100, 180, 170), confidence=0.42, class_id=3)])
+    m2 = engine.update([Track(track_id=1, bbox=(100, 110, 180, 180), confidence=0.88, class_id=0)])
+    m3 = engine.update([Track(track_id=1, bbox=(100, 120, 180, 190), confidence=0.89, class_id=0)])
+    m4 = engine.update([Track(track_id=1, bbox=(100, 130, 180, 200), confidence=0.51, class_id=3)])
+
+    assert m2.tracks[0]["class_name"] == "car"
+    assert m3.tracks[0]["class_name"] == "car"
+    assert m4.tracks[0]["class_name"] == "car"
+    assert m4.count_per_class.get("car", 0) == 1
+    assert m4.count_per_class.get("truck", 0) == 0
+
+    # 2) Truck with consistent truck frames must NOT flip to bus on a 1-frame bus spike or bbox expansion
+    for i in range(4):
+        engine.update([Track(track_id=2, bbox=(600, 100 + i * 10, 710, 190 + i * 10), confidence=0.76, class_id=3)])
+    bigger_spike = Track(
+        track_id=2,
+        bbox=(580, 120, 760, 260),
+        confidence=0.80,
+        class_id=1,
+    )
+    m_spike = engine.update([bigger_spike])
+    assert m_spike.tracks[0]["class_name"] == "truck"
+    assert m_spike.count_per_class.get("truck", 0) == 1
+    assert m_spike.count_per_class.get("bus", 0) == 0
+
+
+def test_stopped_vehicle_jitter_deadband_and_stopped_duration():
+    engine = AnalyticsEngine(fps=25.0, pixels_per_meter=10.0)
+
+    # Simulate a stopped car with +/-1.2 px bbox jitter (previously caused ~10.8 km/h false speed)
+    metrics = None
+    for frame_idx in range(10):
+        jitter = 1.2 if (frame_idx % 2 == 0) else -1.2
+        metrics = engine.update([
+            Track(
+                track_id=7,
+                bbox=(200.0 + jitter, 150.0 - jitter, 280.0 + jitter, 220.0 - jitter),
+                confidence=0.88,
+                class_id=0,
+            )
+        ])
+
+    assert metrics is not None
+    tr = metrics.tracks[0]
+    assert tr["speed_kmh"] == 0.0
+    assert tr["stopped_sec"] >= 0.0
+

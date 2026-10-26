@@ -607,10 +607,8 @@ class Pipeline:
 
         # Draw track boxes and tracking centroids
         speed_map = {t["id"]: t.get("speed_kmh") for t in metrics.tracks}
-        in_frame_motors = 0
+        stop_map = {t["id"]: t.get("stopped_sec", 0.0) for t in metrics.tracks}
         for track in tracks:
-            if getattr(track, "class_name", "") == "motorcycle":
-                in_frame_motors += 1
             x1, y1, x2, y2 = [int(v) for v in track.bbox]
             is_counted = self._crossed_flash.get(track.track_id, 0) > 0
             if is_counted:
@@ -631,7 +629,13 @@ class Pipeline:
             cv2.circle(out, (cx, cy), 4, (0, 0, 0), 1)
 
             spd = speed_map.get(track.track_id)
-            spd_str = f" {spd:.0f}km/h" if spd is not None else ""
+            stopped_s = stop_map.get(track.track_id, 0.0) or 0.0
+            if spd is not None and spd < 5.0 and stopped_s >= 1.0:
+                spd_str = f" STOP {int(stopped_s)}s"
+            elif spd is not None:
+                spd_str = f" {spd:.0f}km/h"
+            else:
+                spd_str = ""
             label = f"#{track.track_id} {track.class_name}{spd_str}{hit_badge}"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             cv2.rectangle(out, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
@@ -642,7 +646,7 @@ class Pipeline:
         motor_total = metrics.count_per_class.get("motorcycle", 0)
         hud = [
             f"Count ({'per ID' if id_mode else 'per line'}): {metrics.total_count} (Motor: {motor_total})",
-            f"In frame: {metrics.vehicles_in_frame} (Motor: {in_frame_motors})",
+            f"In frame: {metrics.vehicles_in_frame}",
             f"Avg speed: {metrics.avg_speed_kmh:.1f} km/h",
         ]
         for i, line in enumerate(hud):

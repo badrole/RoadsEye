@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 
 from core.detector import CLASS_NAMES
-from core.tracker import Track, _box_metrics, _shift_box
+from core.tracker import Track
 
 COUNT_MODES = ("line", "id")
 ID_MODE_LINE_NAME = "ID"
@@ -295,13 +295,8 @@ class _IdTrackRecord:
     last_track: Track
     hits: int = 0
     zone_hits: int = 0
-    missing_frames: int = 0
-    max_area: float = 0.0
-    vote_ref_area: float = 0.0
-    recent_areas: deque[float] = field(default_factory=lambda: deque(maxlen=6))
+    max_conf: float = 0.0
     votes: dict[str, float] = field(default_factory=lambda: defaultdict(float))
-    vx: float = 0.0
-    vy: float = 0.0
     last_seen: float = 0.0
 
 
@@ -312,11 +307,7 @@ class IdCounter:
     counted ONLY after its entire bounding box is 100% inside the obstacle-free zone,
     and its vehicle type is determined from detections while fully inside the zone."""
 
-    MIN_VEHICLE_HITS = 10
-    MIN_MOTORCYCLE_HITS = 3
-    MAX_HOLD_FRAMES = 30
-    EXIT_FLUSH_MISSING_FRAMES = 3
-    MIN_EXIT_HITS = 2
+    MIN_HITS = 1
     FORGET_AFTER_S = 60.0
 
     def __init__(self, zone: list[tuple[int, int]] | None = None) -> None:
@@ -327,7 +318,6 @@ class IdCounter:
         self._counted: set[int] = set()
         self._counted_class: dict[int, str] = {}
         self._last_seen: dict[int, float] = {}
-        self._flush_immediate: bool = False
         self.total_count: int = 0
         self.count_per_class: dict[str, int] = defaultdict(int)
         self.last_counted: list[tuple[Track, str]] = []
@@ -344,8 +334,6 @@ class IdCounter:
         for tid in track_ids:
             self._counted.add(tid)
             self._last_seen[tid] = now_ts
-        if flush_uncounted:
-            self._flush_immediate = True
 
     def update(self, tracks: list[Track], count: bool = True) -> None:
         now_ts = time.time()
@@ -355,69 +343,31 @@ class IdCounter:
 
         for track in tracks:
             tid = track.track_id
-            area = max(track.area, 1.0)
             in_zone_full = _bbox_fully_in_zone(track.bbox, self.zone) if has_zone else True
             rec = self._records.get(tid)
-
-            # Spatial ID lock fallback: if a new four-wheeler track appears overlapping
-            # a recently seen four-wheeler track (e.g. emerging from behind an obstacle),
-            # inherit the existing record so it cannot double-count.
-            if rec is None and track.class_id != 2:
-                merged_from = self._find_overlapping_four_wheeler(track, current_ids, now_ts)
-                if merged_from is not None:
-                    rec = self._records.pop(merged_from)
-                    rec.tid = tid
-                    self._records[tid] = rec
-                    if merged_from in self._counted:
-                        self._counted.discard(merged_from)
-                        self._counted.add(tid)
-                    if merged_from in self._counted_class:
-                        self._counted_class[tid] = self._counted_class.pop(merged_from)
-                    self._last_seen.pop(merged_from, None)
 
             if rec is None:
                 rec = _IdTrackRecord(
                     tid=tid,
                     bbox=track.bbox,
                     last_track=track,
-                    max_area=area,
-                    vote_ref_area=area,
                     last_seen=now_ts,
                 )
                 self._records[tid] = rec
             else:
-                dt = max(1, rec.missing_frames + 1)
-                pcx = (rec.bbox[0] + rec.bbox[2]) * 0.5
-                pcy = (rec.bbox[1] + rec.bbox[3]) * 0.5
-                ncx, ncy = track.center
-                ivx, ivy = (ncx - pcx) / dt, (ncy - pcy) / dt
-                rec.vx = 0.6 * rec.vx + 0.4 * ivx if rec.hits > 1 else ivx
-                rec.vy = 0.6 * rec.vy + 0.4 * ivy if rec.hits > 1 else ivy
                 rec.bbox = track.bbox
                 rec.last_track = track
-                rec.missing_frames = 0
                 rec.last_seen = now_ts
 
             rec.hits += 1
-            rec.recent_areas.append(area)
-            if area > rec.max_area:
-                rec.max_area = area
 
             # When a counting zone is active and the vehicle enters it 100% for the first time,
             # clear out-of-zone partial votes so only obstacle-free detections decide the class.
             if has_zone and in_zone_full:
                 if rec.zone_hits == 0:
-                    for cls_key in list(rec.votes):
-                        rec.votes[cls_key] *= 0.05
-                    rec.vote_ref_area = area
+                    rec.votes.clear()
+                    rec.max_conf = 0.0
                 rec.zone_hits += 1
-
-            # If bounding box grew significantly (vehicle just emerged from obstacle into clear area),
-            # decay older small-box votes so the full-body classification dominates.
-            if rec.vote_ref_area > 0 and area >= 1.25 * rec.vote_ref_area:
-                for cls_key in list(rec.votes):
-                    rec.votes[cls_key] *= 0.20
-                rec.vote_ref_area = area
 
             # Lock class once an already-counted vehicle starts leaving the counting zone
             if has_zone and tid in self._counted and not in_zone_full:
@@ -427,11 +377,17 @@ class IdCounter:
                 self._last_seen[tid] = now_ts
                 continue
 
-            vote_weight = (area / max(rec.max_area, 1.0)) * max(track.confidence, 0.1)
-            if area >= 0.85 * rec.max_area:
-                vote_weight *= 1.5
-            if has_zone and not in_zone_full:
-                vote_weight *= 0.05
+            conf = max(track.confidence, 0.1)
+            if conf >= 0.78 and 0.0 < rec.max_conf < 0.55:
+                rec.votes.clear()
+
+            if rec.max_conf >= 0.75 and conf < 0.50:
+                vote_weight = conf * 0.1
+            else:
+                vote_weight = conf
+                if conf > rec.max_conf:
+                    rec.max_conf = conf
+
             rec.votes[track.class_name] += vote_weight
             best_cls = max(rec.votes.items(), key=lambda kv: kv[1])[0]
 
@@ -451,24 +407,9 @@ class IdCounter:
                     self._counted_class[tid] = best_cls
                 continue
 
-            if count and self._is_ready_to_count(rec, track, has_zone, in_zone_full):
+            ready = (in_zone_full and rec.zone_hits >= 1) if has_zone else (rec.hits >= self.MIN_HITS)
+            if count and ready:
                 self._commit_count(tid, track, best_cls)
-
-        self._flush_immediate = False
-
-        # Handle tracks that disappeared from current frame
-        for tid, rec in list(self._records.items()):
-            if tid not in current_ids:
-                rec.missing_frames += 1
-                if (
-                    count
-                    and not has_zone
-                    and tid not in self._counted
-                    and rec.missing_frames == self.EXIT_FLUSH_MISSING_FRAMES
-                    and rec.hits >= self.MIN_EXIT_HITS
-                ):
-                    best_cls = max(rec.votes.items(), key=lambda kv: kv[1])[0]
-                    self._commit_count(tid, rec.last_track, best_cls)
 
         for tid, ts in list(self._last_seen.items()):
             if now_ts - ts > self.FORGET_AFTER_S and tid not in current_ids:
@@ -476,66 +417,6 @@ class IdCounter:
                 self._counted.discard(tid)
                 self._counted_class.pop(tid, None)
                 self._records.pop(tid, None)
-
-    def _is_ready_to_count(
-        self,
-        rec: _IdTrackRecord,
-        track: Track,
-        has_zone: bool,
-        in_zone_full: bool,
-    ) -> bool:
-        if has_zone:
-            return in_zone_full and rec.zone_hits >= 1
-        if self._flush_immediate and not self._is_box_expanding(rec):
-            return True
-        if track.class_id == 2:
-            return rec.hits >= self.MIN_MOTORCYCLE_HITS
-        if rec.hits >= self.MAX_HOLD_FRAMES:
-            return True
-        if rec.hits < self.MIN_VEHICLE_HITS:
-            return False
-        return not self._is_box_expanding(rec)
-
-    @staticmethod
-    def _is_box_expanding(rec: _IdTrackRecord) -> bool:
-        """True while the bounding box is still noticeably growing frame-over-frame
-        (e.g. a truck emerging from behind an obstacle or frame edge)."""
-        areas = list(rec.recent_areas)
-        if len(areas) < 3:
-            return False
-        prev_mean = sum(areas[:-1]) / len(areas[:-1])
-        return prev_mean > 0 and areas[-1] > 1.08 * prev_mean
-
-    def _find_overlapping_four_wheeler(
-        self,
-        track: Track,
-        current_ids: set[int],
-        now_ts: float,
-    ) -> int | None:
-        tx1, ty1, tx2, ty2 = track.bbox
-        t_diag = max(math.hypot(tx2 - tx1, ty2 - ty1), 30.0)
-        best_tid: int | None = None
-        best_score = 0.0
-
-        for old_tid, rec in self._records.items():
-            if old_tid in current_ids or rec.last_track.class_id == 2:
-                continue
-            if now_ts - rec.last_seen > 2.5 or rec.missing_frames > 25:
-                continue
-            dt = max(1, rec.missing_frames)
-            proj_box = _shift_box(rec.bbox, rec.vx * dt, rec.vy * dt)
-            iou, io_min, cdist = _box_metrics(proj_box, track.bbox)
-            rx1, ry1, rx2, ry2 = rec.bbox
-            r_diag = max(math.hypot(rx2 - rx1, ry2 - ry1), 30.0)
-            ref_diag = max(t_diag, r_diag)
-
-            if io_min >= 0.45 or (iou >= 0.20 and cdist <= 0.75 * ref_diag):
-                score = io_min + iou - (cdist / (ref_diag * 2.0))
-                if score > best_score:
-                    best_score = score
-                    best_tid = old_tid
-
-        return best_tid
 
     def _commit_count(self, tid: int, track: Track, cls: str) -> None:
         self.total_count += 1
@@ -548,13 +429,16 @@ class IdCounter:
 # ── Speed estimator ──────────────────────────────────────────────────────────
 
 class SpeedEstimator:
-    """Estimates speed from pixel displacement between frames."""
+    """Estimates speed from net pixel displacement across a smoothing window."""
+
+    JITTER_NET_PX_DEADBAND = 3.5
+    JITTER_FRAME_PX_DEADBAND = 0.55
 
     def __init__(
         self,
         pixels_per_meter: float = 10.0,
         fps: float = 25.0,
-        smoothing_window: int = 5,
+        smoothing_window: int = 8,
     ) -> None:
         self.pixels_per_meter = pixels_per_meter
         self.fps = fps
@@ -573,12 +457,12 @@ class SpeedEstimator:
 
             if len(hist) >= 2:
                 positions = list(hist)
-                total_px = sum(
-                    np.linalg.norm(np.array(positions[i + 1]) - np.array(positions[i]))
-                    for i in range(len(positions) - 1)
-                )
-                px_per_frame = total_px / (len(positions) - 1)
-                speed_kmh = (px_per_frame / self.pixels_per_meter) * self.fps * 3.6
+                net_px = float(np.linalg.norm(np.array(positions[-1]) - np.array(positions[0])))
+                px_per_frame = net_px / (len(positions) - 1)
+                if net_px < self.JITTER_NET_PX_DEADBAND or px_per_frame < self.JITTER_FRAME_PX_DEADBAND:
+                    speed_kmh = 0.0
+                else:
+                    speed_kmh = (px_per_frame / self.pixels_per_meter) * self.fps * 3.6
                 samples.append(
                     SpeedSample(
                         track_id=track.track_id,
@@ -734,6 +618,8 @@ class AnalyticsEngine:
 
     SPEED_HISTORY_LEN = 50
     WARMUP_FRAMES = 0
+    STOPPED_SPEED_KMH = 5.0
+    STOPPED_ANCHOR_RADIUS_PX = 12.0
 
     def __init__(
         self,
@@ -764,6 +650,11 @@ class AnalyticsEngine:
         self.count_mode: str = "line"
         self._id_counter = IdCounter(zone=counting_zone)
         self._visible_ids: set[int] = set()
+        self._conf_votes: dict[int, dict[int, float]] = {}  # tid -> {class_id: weighted_conf}
+        self._max_conf: dict[int, float] = {}               # tid -> highest confidence seen
+        self._stopped_since: dict[int, float] = {}          # tid -> epoch when stopped started
+        self._stopped_anchor: dict[int, tuple[float, float]] = {}
+        self._track_last_seen: dict[int, float] = {}
 
     @property
     def zone_points(self) -> list[tuple[int, int]]:
@@ -875,6 +766,38 @@ class AnalyticsEngine:
         do_count = self.counting_enabled and warmup_done
         id_mode = self.count_mode == "id"
         self._visible_ids = {t.track_id for t in tracks}
+
+        # ── Per-ID counting & zone-aware class stabilization ──────────────────
+        if id_mode:
+            self._id_counter.update(tracks, count=do_count)
+            for t in tracks:
+                self._track_last_seen[t.track_id] = frame_ts
+        else:
+            for t in tracks:
+                tid = t.track_id
+                conf = max(t.confidence, 0.1)
+                prev_max = self._max_conf.get(tid, 0.0)
+                cvotes = self._conf_votes.get(tid)
+                if cvotes is None:
+                    cvotes = defaultdict(float)
+                    self._conf_votes[tid] = cvotes
+
+                if conf >= 0.78 and 0.0 < prev_max < 0.55:
+                    cvotes.clear()
+
+                if prev_max >= 0.75 and conf < 0.50:
+                    w = conf * 0.1
+                else:
+                    w = conf
+                    if conf > prev_max:
+                        self._max_conf[tid] = conf
+
+                cvotes[t.class_id] += w
+                best_cls_id = max(cvotes.items(), key=lambda kv: kv[1])[0]
+                if best_cls_id != t.class_id:
+                    t.set_class_id(best_cls_id)
+                self._track_last_seen[tid] = frame_ts
+
         for name, line in self._lines:
             line.update(tracks, count=do_count and not id_mode)
             count_per_line[name] = line.total_count
@@ -896,9 +819,7 @@ class AnalyticsEngine:
 
         count_per_class = dict(count_per_class)
 
-        # ── Per-ID counting ───────────────────────────────────────────────────
         if id_mode:
-            self._id_counter.update(tracks, count=do_count)
             total_count = self._id_counter.total_count
             count_per_class = dict(self._id_counter.count_per_class)
             count_per_line = {ID_MODE_LINE_NAME: total_count}
@@ -933,19 +854,53 @@ class AnalyticsEngine:
             for a in list(self._recent_alerts)[-5:]
         ]
 
-        # ── Serialise tracks ──────────────────────────────────────────────────
+        # ── Serialise tracks & compute stopped duration (< 5 km/h or anchored) ─
         speed_map = {s.track_id: s.speed_kmh for s in speed_samples}
-        tracks_data = [
-            {
-                "id":         t.track_id,
-                "bbox":       list(t.bbox),
-                "class_id":   t.class_id,
-                "class_name": t.class_name,
-                "confidence": round(t.confidence, 3),
-                "speed_kmh":  speed_map.get(t.track_id),
-            }
-            for t in tracks
-        ]
+        tracks_data = []
+        for t in tracks:
+            tid = t.track_id
+            cx, cy = t.center
+            spd = speed_map.get(tid)
+            anchor = self._stopped_anchor.get(tid)
+            dist_from_anchor = (
+                math.hypot(cx - anchor[0], cy - anchor[1]) if anchor is not None else 0.0
+            )
+
+            if spd is None:
+                self._stopped_since.setdefault(tid, frame_ts)
+                self._stopped_anchor.setdefault(tid, (cx, cy))
+                stopped_sec = 0.0
+            elif spd < self.STOPPED_SPEED_KMH or (
+                tid in self._stopped_since and dist_from_anchor <= self.STOPPED_ANCHOR_RADIUS_PX
+            ):
+                start_ts = self._stopped_since.setdefault(tid, frame_ts)
+                self._stopped_anchor.setdefault(tid, (cx, cy))
+                stopped_sec = round(max(0.1, frame_ts - start_ts), 1)
+                if spd >= self.STOPPED_SPEED_KMH:
+                    spd = 0.0
+            else:
+                self._stopped_since.pop(tid, None)
+                self._stopped_anchor.pop(tid, None)
+                stopped_sec = 0.0
+
+            tracks_data.append({
+                "id":          tid,
+                "bbox":        list(t.bbox),
+                "class_id":    t.class_id,
+                "class_name":  t.class_name,
+                "confidence":  round(t.confidence, 3),
+                "speed_kmh":   spd,
+                "stopped_sec": stopped_sec,
+            })
+
+        for tid, last_ts in list(self._track_last_seen.items()):
+            if tid not in self._visible_ids and frame_ts - last_ts > 3.0:
+                self._track_last_seen.pop(tid, None)
+                self._stopped_since.pop(tid, None)
+                self._stopped_anchor.pop(tid, None)
+                if frame_ts - last_ts > 60.0:
+                    self._conf_votes.pop(tid, None)
+                    self._max_conf.pop(tid, None)
 
         self._frame_index += 1
 

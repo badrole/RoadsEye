@@ -1,6 +1,7 @@
 /**
  * VehicleTimestampFeed — displays real-time timestamps, tracker IDs (#id),
- * vehicle types, and counting mode (Per ID or Per Line) of counted vehicles.
+ * vehicle types, counting mode, and live STOPPED FOR ... SEC duration for
+ * vehicles with speed < 5 km/h.
  */
 import { useState, useEffect, useRef } from 'react'
 
@@ -47,20 +48,92 @@ export default function VehicleTimestampFeed({ latest, countMode = 'line' }) {
   const containerRef = useRef(null)
 
   useEffect(() => {
-    const crossings = latest?.crossings
-    if (crossings && Array.isArray(crossings) && crossings.length > 0) {
-      setFeed((prev) => {
-        const newItems = crossings.map((c, i) => ({
+    if (!latest) return
+    const crossings = Array.isArray(latest.crossings) ? latest.crossings : []
+    const tracks = Array.isArray(latest.tracks) ? latest.tracks : []
+    const frameTs = latest.timestamp || Date.now() / 1000
+
+    const liveTrackMap = new Map()
+    for (const t of tracks) {
+      if (t.id != null) {
+        const isStopped = t.speed_kmh != null && t.speed_kmh < 5 && (t.stopped_sec ?? 0) >= 1
+        liveTrackMap.set(t.id, {
+          class_name: t.class_name,
+          speed_kmh: t.speed_kmh,
+          stopped_sec: isStopped ? t.stopped_sec : 0,
+          isStopped,
+        })
+      }
+    }
+
+    if (crossings.length === 0 && liveTrackMap.size === 0) return
+
+    setFeed((prev) => {
+      let updated = prev.map((item) => {
+        const live = item.track_id != null ? liveTrackMap.get(item.track_id) : null
+        if (!live) {
+          return item.currently_stopped ? { ...item, currently_stopped: false } : item
+        }
+        return {
+          ...item,
+          class_name: live.class_name || item.class_name,
+          stopped_sec: live.isStopped
+            ? Math.max(item.stopped_sec || 0, live.stopped_sec)
+            : item.stopped_sec || 0,
+          currently_stopped: live.isStopped,
+        }
+      })
+
+      const existingIds = new Set(updated.map((it) => it.track_id).filter((id) => id != null))
+
+      const newCrossingItems = []
+      for (let i = 0; i < crossings.length; i++) {
+        const c = crossings[i]
+        const live = c.track_id != null ? liveTrackMap.get(c.track_id) : null
+        if (c.track_id != null && existingIds.has(c.track_id)) {
+          updated = updated.map((it) =>
+            it.track_id === c.track_id
+              ? {
+                  ...it,
+                  timestamp: c.timestamp || it.timestamp,
+                  class_name: live?.class_name || c.class_name || it.class_name,
+                  line_name: c.line_name || (countMode === 'id' ? 'ID' : 'line1'),
+                }
+              : it
+          )
+          continue
+        }
+        if (c.track_id != null) existingIds.add(c.track_id)
+        newCrossingItems.push({
           id: `${c.timestamp}-${c.track_id ?? i}-${Math.random()}`,
-          timestamp: c.timestamp,
-          class_name: c.class_name || 'vehicle',
+          timestamp: c.timestamp || frameTs,
+          class_name: live?.class_name || c.class_name || 'vehicle',
           track_id: c.track_id,
           line_name: c.line_name || (countMode === 'id' ? 'ID' : 'line1'),
-        }))
-        return [...newItems, ...prev].slice(0, 50)
-      })
-    }
-  }, [latest?.crossings, countMode])
+          stopped_sec: live?.isStopped ? live.stopped_sec : 0,
+          currently_stopped: Boolean(live?.isStopped),
+        })
+      }
+
+      const newStoppedItems = []
+      for (const [tid, live] of liveTrackMap.entries()) {
+        if (live.isStopped && !existingIds.has(tid)) {
+          existingIds.add(tid)
+          newStoppedItems.push({
+            id: `${frameTs}-${tid}-stopped`,
+            timestamp: frameTs,
+            class_name: live.class_name || 'vehicle',
+            track_id: tid,
+            line_name: countMode === 'id' ? 'ID' : 'IN FRAME',
+            stopped_sec: live.stopped_sec,
+            currently_stopped: true,
+          })
+        }
+      }
+
+      return [...newCrossingItems, ...newStoppedItems, ...updated].slice(0, 50)
+    })
+  }, [latest, countMode])
 
   return (
     <div className="panel relative p-4 flex flex-col overflow-hidden">
@@ -93,6 +166,7 @@ export default function VehicleTimestampFeed({ latest, countMode = 'line' }) {
             const color = CLASS_COLORS[item.class_name] ?? '#22d3ee'
             const label = CLASS_LABELS[item.class_name] ?? item.class_name
             const isLatest = idx === 0
+            const stoppedSec = item.stopped_sec ? Math.max(1, Math.floor(item.stopped_sec)) : 0
 
             return (
               <div
@@ -103,12 +177,12 @@ export default function VehicleTimestampFeed({ latest, countMode = 'line' }) {
                     : 'bg-asphalt-deep/60 border-lane-dim/20 text-chalk/80'
                 }`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <span
                     className="w-2.5 h-2.5 rounded-sm shrink-0"
                     style={{ backgroundColor: color }}
                   />
-                  <div className="font-code text-xs font-semibold flex items-center gap-2">
+                  <div className="font-code text-xs font-semibold flex items-center gap-2 flex-wrap">
                     {item.track_id != null && (
                       <span className="text-[11px] font-bold text-lane bg-asphalt-deep border border-lane-dim/50 px-1.5 py-0.5 rounded">
                         #{item.track_id}
@@ -118,6 +192,17 @@ export default function VehicleTimestampFeed({ latest, countMode = 'line' }) {
                     <span className="text-[10px] text-pip border border-lane-dim/30 px-1.5 py-0.5 rounded uppercase">
                       {item.line_name}
                     </span>
+                    {stoppedSec >= 1 && (
+                      <span
+                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded border tracking-wider ${
+                          item.currently_stopped
+                            ? 'bg-stop/25 text-stop border-stop/60 animate-pulse'
+                            : 'bg-stop/15 text-stop/90 border-stop/40'
+                        }`}
+                      >
+                        STOPPED FOR {stoppedSec} SEC
+                      </span>
+                    )}
                     {isLatest && (
                       <span className="text-[10px] bg-go/20 text-go px-1.5 py-0.2 rounded border border-go/40">
                         NEW

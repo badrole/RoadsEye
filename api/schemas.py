@@ -24,6 +24,7 @@ class TrackData(BaseModel):
     class_name: str
     confidence: float
     speed_kmh: float | None = None
+    stopped_sec: float = 0.0
 
 
 class CrossingData(BaseModel):
