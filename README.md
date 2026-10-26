@@ -25,14 +25,13 @@ Each video source runs through a 4-stage concurrent pipeline (`reader -> inferen
 
 - Switch between two counting modes (`line` and `id`) while the pipeline runs:
   - `line` mode counts vehicles when their bounding-box center crosses a named tripwire line.
-  - `id` mode counts every tracked vehicle in frame once by tracker ID, with 5-frame majority-vote class refinement.
+  - `id` mode counts every tracked vehicle once by tracker ID, with an optional obstacle-free counting zone polygon (`ZONA HITUNG`) so vehicles are counted only when their bounding box is 100% inside the clear zone.
   - Switching modes carries over the daily WIB tally without double-counting vehicles already recorded.
-- Add, drag, or delete counting lines directly over the live video canvas. Line updates apply immediately without resetting vehicle counts.
-- Estimate vehicle speed in km/h from pixel displacement (`pixels_per_meter`) and trigger alerts for traffic surges (frame count above the 60-frame mean + 2 standard deviations), stopped vehicles (under 5 px movement for 30 frames), and confidence drift (30-frame rolling mean dropping 15% below the initial 100-frame baseline).
+- Add, drag, or delete counting lines and Per-ID counting zones directly over the live video canvas. Edits apply immediately without resetting vehicle counts.
+- Estimate vehicle speed in km/h from net pixel displacement (`pixels_per_meter`), track stopped duration (`STOPPED FOR ... SEC` for vehicles under 5 km/h), and trigger alerts for traffic surges, stopped vehicles, and confidence drift.
 - Store confirmed vehicle crossings in `data/roadseye.db` (SQLite WAL). A background writer commits buffered events every second (or every 5 events) and flushes on pipeline stop or shutdown.
 - Resume daily counts across restarts on the same calendar day (Asia/Jakarta, UTC+7) by reloading today's totals from `data/roadseye.db`, resetting at 00:00 WIB.
 - Open `?view=database` from the dashboard to filter historical events by date and class, export Excel-ready UTF-8 CSV files, create online SQLite backups (`VACUUM INTO`), or delete specific dates from both SQLite and Google Sheets.
-- Run a synthetic two-lane traffic stream by setting the source to `demo` when testing without a camera, GPU, or ONNX model file.
 
 ---
 
@@ -75,7 +74,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, enter a video source (`0` for webcam, a local `.mp4` path, an `rtsp://` or `.m3u8` URL, or `demo`), choose `Per Line` or `Per ID`, and click **START PIPELINE**.
+Open `http://localhost:3000`, enter a video source (`0` for webcam, a local `.mp4` path, or an `rtsp://` / `.m3u8` URL), choose `Per Line` or `Per ID`, and click **START PIPELINE**.
 
 ---
 
@@ -85,7 +84,7 @@ Copy `.env.example` to `.env` in the project root. `api/main.py` loads `.env` on
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VIDEO_SOURCE` | unset | Source to auto-start on boot (`0`, file path, RTSP/HLS URL, or `demo`). Leave empty to start manually from the UI. |
+| `VIDEO_SOURCE` | unset | Source to auto-start on boot (`0`, file path, or RTSP/HLS URL). Leave empty to start manually from the UI. |
 | `MODEL_PATH` | `models/weights/yolov8s_traffic.onnx` | Path to the YOLOv8 ONNX model. |
 | `CONFIDENCE_THRESHOLD` | `0.25` | Minimum detection confidence (`0.0` to `1.0`). |
 | `IOU_THRESHOLD` | `0.45` | NMS IoU threshold (`0.0` to `1.0`). |
@@ -102,11 +101,12 @@ Copy `.env.example` to `.env` in the project root. `api/main.py` loads `.env` on
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `source` | `0` | Webcam index, file path, RTSP/HLS URL, or `demo`. |
+| `source` | `0` | Webcam index, file path, or RTSP/HLS URL. |
 | `confidence_threshold` | `0.25` | Detection confidence threshold (`0.0` to `1.0`). |
 | `iou_threshold` | `0.45` | NMS IoU threshold (`0.0` to `1.0`). |
 | `skip_frames` | `0` | Number of intermediate frames to reuse detections on (`0` = run inference on every frame). |
 | `counting_lines` | `[]` | Array of `{name, x1, y1, x2, y2}`; falls back to active/default lines when empty. |
+| `counting_zone` | `[]` | Polygon points `[{x, y}, ...]` for the Per-ID obstacle-free counting zone. |
 | `count_mode` | current mode | `"line"` or `"id"`. |
 | `pixels_per_meter` | `10.0` | Calibration factor for speed estimation (`> 0`). |
 | `loop` | `false` | Restart local video files at EOF. |
@@ -126,8 +126,9 @@ Full OpenAPI documentation is available at `http://localhost:8000/docs`.
 | `/health` | GET | Server health and version check. |
 | `/pipeline/start` | POST | Start or restart the pipeline. |
 | `/pipeline/stop` | POST | Stop the pipeline, flush events to SQLite, and trigger Google Sheets sync. |
-| `/pipeline/status` | GET | Current status, source, frame index, FPS, uptime, count mode, and lines. |
+| `/pipeline/status` | GET | Current status, source, frame index, FPS, uptime, count mode, lines, and counting zone. |
 | `/pipeline/lines` | GET / POST | Read or update counting line coordinates on the fly. |
+| `/pipeline/zone` | GET / POST | Read or update the Per-ID counting zone polygon on the fly. |
 | `/pipeline/count-mode` | GET / POST | Read or switch counting mode (`line` or `id`) without losing the daily count. |
 | `/ws/video` | WebSocket | Streams binary JPEG frames to the browser canvas. |
 | `/ws/metrics` | WebSocket | Streams JSON `MetricsMessage` updates (counts, speed, alerts, tracks, crossings). |
@@ -166,8 +167,7 @@ RoadsEye/
 │   ├── video_source.py       VideoCapture wrapper and parallel HLS prefetcher
 │   ├── detector.py           YOLOv8 ONNX Runtime inference and NMS
 │   ├── tracker.py            ByteTrack wrapper
-│   ├── analytics.py          Line counter, ID counter, speed, anomaly, and drift
-│   └── demo_generator.py     Synthetic traffic generator for demo mode
+│   └── analytics.py          Line counter, ID counter, counting zone, speed, and alerts
 ├── dashboard/
 │   ├── src/App.jsx           Main monitoring layout and database viewer router
 │   ├── src/components/       VideoFeed, LineEditor, StatsCards, charts, DatabaseViewer
