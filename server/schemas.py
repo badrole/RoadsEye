@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 if TYPE_CHECKING:
-    from core.analytics import CountingLineSpec
+    from engine.traffic_metrics import CountingLineSpec
 
 
 # ── WebSocket message schemas ─────────────────────────────────────────────────
@@ -59,7 +59,7 @@ class MetricsMessage(BaseModel):
 
     @classmethod
     def from_frame_metrics(cls, m: Any) -> "MetricsMessage":
-        """Convert core.analytics.FrameMetrics → MetricsMessage."""
+        """Convert engine.traffic_metrics.FrameMetrics → MetricsMessage."""
         return cls(
             timestamp=m.timestamp,
             frame_index=m.frame_index,
@@ -86,7 +86,7 @@ class CountingLineConfig(BaseModel):
     y2: int
 
     def as_spec(self) -> "CountingLineSpec":
-        from core.analytics import CountingLineSpec  # noqa: PLC0415
+        from engine.traffic_metrics import CountingLineSpec  # noqa: PLC0415
         return CountingLineSpec(
             name=self.name,
             p1=(self.x1, self.y1),

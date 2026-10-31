@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import pytest
 from unittest.mock import MagicMock, patch
-from api.sheets_sync import _format_peak_hour_range, _col_letter, is_configured
+from server.gsheets_exporter import _format_peak_hour_range, _col_letter, is_configured
 
 
 def test_format_peak_hour_range():
@@ -19,7 +19,7 @@ def test_col_letter():
 
 
 def test_is_configured():
-    with patch("api.sheets_sync.get_spreadsheet_id", return_value="test_id"):
-        with patch("api.sheets_sync.get_credentials_path") as mock_path:
+    with patch("server.gsheets_exporter.get_spreadsheet_id", return_value="test_id"):
+        with patch("server.gsheets_exporter.get_credentials_path") as mock_path:
             mock_path.return_value.exists.return_value = True
             assert is_configured() is True

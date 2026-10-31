@@ -14,18 +14,18 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 # Patch database to use a temp file so tests don't touch the real DB
-import tempfile, api.database as _db_module
+import tempfile, server.state_buffer as _db_module
 from pathlib import Path
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp_db.close()
 _db_module.DB_PATH = Path(_tmp_db.name)
 
-from api.main import app
+from server.app import app
 
 
 @pytest_asyncio.fixture
 async def client():
-    from api.database import init_db
+    from server.state_buffer import init_db
     await init_db()   # ensure tables exist before each test
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -121,7 +121,7 @@ async def test_analytics_summary_no_data(client: AsyncClient):
 # ── Schemas: MetricsMessage round-trip ───────────────────────────────────────
 
 def test_metrics_message_schema():
-    from api.schemas import MetricsMessage
+    from server.schemas import MetricsMessage
     import time
     payload = {
         "timestamp": time.time(),
@@ -146,13 +146,13 @@ def test_metrics_message_schema():
 
 
 def test_pipeline_start_request_coerces_source():
-    from api.schemas import PipelineStartRequest
+    from server.schemas import PipelineStartRequest
     req = PipelineStartRequest(source="2")
     assert req.source == 2   # int coercion
 
 
 def test_counting_line_as_spec():
-    from api.schemas import CountingLineConfig
+    from server.schemas import CountingLineConfig
     line = CountingLineConfig(x1=0, y1=100, x2=1280, y2=100)
     spec = line.as_spec()
     assert spec.p1 == (0, 100)

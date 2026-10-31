@@ -1,7 +1,7 @@
 """FastAPI application entry point.
 
 Run with:
-    uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 
 Environment variables (see .env.example):
     MODEL_PATH            — path to ONNX weights file
@@ -29,8 +29,8 @@ load_dotenv(dotenv_path=env_path)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.database import init_db
-from api.routes import analytics, health, stream
+from server.state_buffer import init_db
+from server.routes import analytics, health, stream
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     print("[API] Database initialised.")
 
     # Persistent event DB (Phase 1)
-    import api.events_db as events_db
+    import server.event_store as events_db
     try:
         resolved = events_db.init_events_db()
         print(f"[API] Events DB (persistent history): {resolved}")
@@ -61,9 +61,9 @@ async def lifespan(app: FastAPI):
     source = os.environ.get("VIDEO_SOURCE", "").strip()
     if source:
         import json
-        from api.pipeline_manager import manager
-        from core.pipeline import PipelineConfig
-        from core.analytics import CountingLineSpec
+        from server.runtime_controller import manager
+        from engine.stream_processor import PipelineConfig
+        from engine.traffic_metrics import CountingLineSpec
 
         try:
             src: str | int = int(source)
@@ -100,12 +100,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    from api.pipeline_manager import manager
+    from server.runtime_controller import manager
     await manager.stop()
     print("[API] Pipeline stopped.")
 
     # Flush pending events to SQLite before exit
-    import api.events_db as events_db
+    import server.event_store as events_db
     events_db.writer.stop()
     print("[API] Event writer flushed and stopped.")
     if sys.platform == "win32":

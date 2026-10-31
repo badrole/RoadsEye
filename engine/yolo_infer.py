@@ -38,7 +38,9 @@ _COCO_IDS = np.array(list(COCO_TRAFFIC_CLASSES.keys()))
 _TRAFFIC_IDS = np.array(list(COCO_TRAFFIC_CLASSES.values()))
 
 # Default ONNX model path — override via MODEL_PATH env var
-DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "models" / "weights" / "yolov8s_traffic.onnx"
+_ROOT_DIR = Path(__file__).parent.parent
+DEFAULT_MODEL_PATH = _ROOT_DIR / "weights" / "yolov8s_traffic.onnx"
+LEGACY_MODEL_PATH = _ROOT_DIR / "models" / "weights" / "yolov8s_traffic.onnx"
 
 
 @dataclass
@@ -84,11 +86,13 @@ class Detector:
         iou_threshold: float = 0.45,
         input_size: int = 640,
     ) -> None:
-        path = Path(
-            model_path
-            or os.environ.get("MODEL_PATH", "")
-            or DEFAULT_MODEL_PATH
-        )
+        raw_path = model_path or os.environ.get("MODEL_PATH", "")
+        path = Path(raw_path) if raw_path else DEFAULT_MODEL_PATH
+        if not path.exists():
+            if DEFAULT_MODEL_PATH.exists():
+                path = DEFAULT_MODEL_PATH
+            elif LEGACY_MODEL_PATH.exists():
+                path = LEGACY_MODEL_PATH
         if not path.exists():
             raise FileNotFoundError(
                 f"ONNX model not found: {path}\n"
@@ -226,7 +230,7 @@ class Detector:
         if indices is None or len(indices) == 0:
             return []
 
-        return [
+        initial_dets = [
             Detection(
                 bbox=(float(x1[i]), float(y1[i]), float(x2[i]), float(y2[i])),
                 confidence=float(conf[i]),
@@ -234,6 +238,79 @@ class Detector:
             )
             for i in np.asarray(indices).flatten()
         ]
+        return self._merge_articulated_parts(initial_dets)
+
+    @staticmethod
+    def _merge_articulated_parts(detections: list[Detection]) -> list[Detection]:
+        """Merge articulated vehicle parts (e.g. truck cabin + trailer/container).
+
+        When a long container truck is detected as two separate boxes (cabin and
+        trailer), standard NMS fails to suppress one because the IoU is low (~0.1-0.2).
+        However, the intersection over smaller area (IoS) is high (>=0.35).
+        This function merges overlapping parts into a single unified truck bounding box.
+        """
+        if len(detections) <= 1:
+            return detections
+
+        merged = []
+        skip = set()
+
+        for i in range(len(detections)):
+            if i in skip:
+                continue
+            d1 = detections[i]
+            bx1, by1, bx2, by2 = d1.bbox
+            b_conf = d1.confidence
+            b_cls = d1.class_id
+            b_area = max(1.0, (bx2 - bx1) * (by2 - by1))
+
+            for j in range(i + 1, len(detections)):
+                if j in skip:
+                    continue
+                d2 = detections[j]
+
+                # Never merge motorcycles (class 2)
+                if d1.class_id == 2 or d2.class_id == 2:
+                    continue
+
+                # At least one must be a heavy vehicle (truck=3 or bus=1)
+                if d1.class_id not in (1, 3) and d2.class_id not in (1, 3):
+                    continue
+
+                ox1, oy1, ox2, oy2 = d2.bbox
+                o_area = max(1.0, (ox2 - ox1) * (oy2 - oy1))
+
+                # Compute intersection
+                ix1, iy1 = max(bx1, ox1), max(by1, oy1)
+                ix2, iy2 = min(bx2, ox2), min(by2, oy2)
+                iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+                inter = iw * ih
+
+                min_area = min(b_area, o_area)
+                ios = inter / min_area if min_area > 0 else 0.0
+
+                # High overlap with the smaller sub-box (cabin or container)
+                if ios >= 0.35:
+                    skip.add(j)
+                    # Union bounding box covers both cabin and container
+                    bx1 = min(bx1, ox1)
+                    by1 = min(by1, oy1)
+                    bx2 = max(bx2, ox2)
+                    by2 = max(by2, oy2)
+                    b_area = max(1.0, (bx2 - bx1) * (by2 - by1))
+                    b_conf = max(b_conf, d2.confidence)
+                    if d2.class_id in (1, 3):
+                        b_cls = d2.class_id
+
+            merged.append(
+                Detection(
+                    bbox=(bx1, by1, bx2, by2),
+                    confidence=b_conf,
+                    class_id=b_cls,
+                )
+            )
+
+        return merged
 
     def __repr__(self) -> str:
         return (

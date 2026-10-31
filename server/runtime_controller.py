@@ -11,8 +11,8 @@ import time
 import uuid
 from collections import deque
 
-from core.pipeline import Pipeline, PipelineConfig
-from api.schemas import CountingLineStatus, MetricsMessage, PipelineStatus, ZonePoint
+from engine.stream_processor import Pipeline, PipelineConfig
+from server.schemas import CountingLineStatus, MetricsMessage, PipelineStatus, ZonePoint
 
 # Max frames queued for WebSocket consumers; older frames are dropped when full
 _VIDEO_QUEUE_MAXSIZE = 2
@@ -63,7 +63,7 @@ class PipelineManager:
     def _load_default_lines(self) -> None:
         import json
         import os
-        from core.analytics import CountingLineSpec
+        from engine.traffic_metrics import CountingLineSpec
         raw = os.environ.get("COUNTING_LINES", "").strip()
         if raw:
             try:
@@ -84,7 +84,7 @@ class PipelineManager:
     def _load_default_zone(self) -> None:
         import json
         import os
-        from core.analytics import DEFAULT_COUNTING_ZONE
+        from engine.traffic_metrics import DEFAULT_COUNTING_ZONE
         raw = os.environ.get("COUNTING_ZONE", "").strip()
         if raw:
             try:
@@ -158,7 +158,7 @@ class PipelineManager:
             # Always open a persistent session for database logging
             self._session_id = uuid.uuid4().hex
             self._camera_id = str(config.source)
-            import api.events_db as events_db
+            import server.event_store as events_db
             events_db.open_session(self._session_id, self._camera_id, source_detail="RoadsEye pipeline")
 
             if not config.counting_lines and self._default_lines:
@@ -252,7 +252,7 @@ class PipelineManager:
         self._pipeline = None
         self._delay_buffer.clear()
         # Mandatory autosave on disconnect/stop
-        import api.events_db as events_db
+        import server.event_store as events_db
         events_db.writer.flush()
         had_persistent_session = self._session_id is not None
         if self._session_id:
@@ -262,7 +262,7 @@ class PipelineManager:
         # Mandatory auto-sync to Google Sheets upon disconnect/stop
         if had_persistent_session:
             try:
-                import api.sheets_sync as sheets_sync
+                import server.gsheets_exporter as sheets_sync
                 if sheets_sync.is_configured():
                     asyncio.create_task(asyncio.to_thread(sheets_sync.sync_to_google_sheets))
             except Exception as e:
@@ -316,8 +316,8 @@ class PipelineManager:
 
     async def _run_loop(self) -> None:
         """Async loop: pull frames from pipeline, fan-out to subscribers."""
-        from api.database import ring_push, upsert_hourly
-        import api.events_db as events_db
+        from server.state_buffer import ring_push, upsert_hourly
+        import server.event_store as events_db
 
         try:
             last_metrics_push = 0.0
@@ -375,7 +375,7 @@ class PipelineManager:
                     if now_ts - self._last_sheets_sync_time >= 900:
                         self._last_sheets_sync_time = now_ts
                         try:
-                            import api.sheets_sync as sheets_sync
+                            import server.gsheets_exporter as sheets_sync
                             if sheets_sync.is_configured():
                                 asyncio.create_task(asyncio.to_thread(sheets_sync.sync_to_google_sheets))
                         except Exception as e:
@@ -405,7 +405,7 @@ class PipelineManager:
             if self._session_id:
                 events_db.writer.flush()
                 try:
-                    import api.sheets_sync as sheets_sync
+                    import server.gsheets_exporter as sheets_sync
                     if sheets_sync.is_configured():
                         import threading as _threading
                         _threading.Thread(

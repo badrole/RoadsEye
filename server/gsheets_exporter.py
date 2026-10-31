@@ -211,7 +211,7 @@ def sync_to_google_sheets() -> dict[str, Any]:
         service = _get_service()
         sheet_map = setup_sheets_if_needed(service, spreadsheet_id)
 
-        import api.events_db as events_db
+        import server.event_store as events_db
         db_path = events_db.DB_PATH
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row

@@ -19,8 +19,8 @@ from typing import Any
 
 import numpy as np
 
-from core.detector import CLASS_NAMES
-from core.tracker import Track
+from engine.yolo_infer import CLASS_NAMES
+from engine.vehicle_tracker import Track
 
 COUNT_MODES = ("line", "id")
 ID_MODE_LINE_NAME = "ID"
@@ -45,28 +45,31 @@ def _point_in_polygon(px: float, py: float, poly: list[tuple[int, int]]) -> bool
     return inside
 
 
-def _bbox_fully_in_zone(
+def _bbox_in_zone(
     bbox: tuple[float, float, float, float],
     zone: list[tuple[int, int]],
 ) -> bool:
-    """Return True iff the entire bounding box (all 4 corners, edge midpoints, and center)
-    lies inside the polygon `zone`."""
+    """Return True if the vehicle is inside the counting zone.
+
+    For large vehicles (trucks, buses, container trucks), requiring all 4 corners
+    and midpoints to be 100% inside simultaneously fails because long vehicles span
+    across boundaries as they travel. Checking centroid, ground-contact points,
+    or significant corner presence guarantees large vehicles are accurately registered in Per-ID counting mode.
+    """
     if len(zone) < 3:
         return True
     x1, y1, x2, y2 = bbox
-    mx, my = (x1 + x2) * 0.5, (y1 + y2) * 0.5
-    test_points = (
-        (x1, y1),
-        (x2, y1),
-        (x2, y2),
-        (x1, y2),
-        (mx, my),
-        (mx, y1),
-        (mx, y2),
-        (x1, my),
-        (x2, my),
-    )
-    return all(_point_in_polygon(px, py, zone) for px, py in test_points)
+    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    # Vehicle centroid is inside zone
+    if _point_in_polygon(cx, cy, zone):
+        return True
+    # Bottom contact (wheels on road) is inside zone
+    if _point_in_polygon(cx, y2, zone):
+        return True
+    # At least two corners inside zone
+    corners = ((x1, y1), (x2, y1), (x1, y2), (x2, y2))
+    inside_corners = sum(1 for px, py in corners if _point_in_polygon(px, py, zone))
+    return inside_corners >= 2
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -307,7 +310,7 @@ class IdCounter:
     counted ONLY after its entire bounding box is 100% inside the obstacle-free zone,
     and its vehicle type is determined from detections while fully inside the zone."""
 
-    MIN_HITS = 1
+    MIN_HITS = 3
     FORGET_AFTER_S = 60.0
 
     def __init__(self, zone: list[tuple[int, int]] | None = None) -> None:
@@ -343,7 +346,7 @@ class IdCounter:
 
         for track in tracks:
             tid = track.track_id
-            in_zone_full = _bbox_fully_in_zone(track.bbox, self.zone) if has_zone else True
+            in_zone_full = _bbox_in_zone(track.bbox, self.zone) if has_zone else True
             rec = self._records.get(tid)
 
             if rec is None:
@@ -407,7 +410,7 @@ class IdCounter:
                     self._counted_class[tid] = best_cls
                 continue
 
-            ready = (in_zone_full and rec.zone_hits >= 1) if has_zone else (rec.hits >= self.MIN_HITS)
+            ready = (in_zone_full and rec.zone_hits >= 2) if has_zone else (rec.hits >= self.MIN_HITS)
             if count and ready:
                 self._commit_count(tid, track, best_cls)
 
@@ -619,7 +622,7 @@ class AnalyticsEngine:
     SPEED_HISTORY_LEN = 50
     WARMUP_FRAMES = 0
     STOPPED_SPEED_KMH = 5.0
-    STOPPED_ANCHOR_RADIUS_PX = 12.0
+    STOPPED_ANCHOR_RADIUS_PX = 25.0
 
     def __init__(
         self,
@@ -654,6 +657,7 @@ class AnalyticsEngine:
         self._max_conf: dict[int, float] = {}               # tid -> highest confidence seen
         self._stopped_since: dict[int, float] = {}          # tid -> epoch when stopped started
         self._stopped_anchor: dict[int, tuple[float, float]] = {}
+        self._stopped_moving_frames: dict[int, int] = defaultdict(int)
         self._track_last_seen: dict[int, float] = {}
 
     @property
@@ -866,22 +870,33 @@ class AnalyticsEngine:
                 math.hypot(cx - anchor[0], cy - anchor[1]) if anchor is not None else 0.0
             )
 
-            if spd is None:
-                self._stopped_since.setdefault(tid, frame_ts)
-                self._stopped_anchor.setdefault(tid, (cx, cy))
-                stopped_sec = 0.0
-            elif spd < self.STOPPED_SPEED_KMH or (
-                tid in self._stopped_since and dist_from_anchor <= self.STOPPED_ANCHOR_RADIUS_PX
-            ):
+            is_stationary = (
+                (spd is not None and spd < self.STOPPED_SPEED_KMH)
+                or (anchor is not None and dist_from_anchor <= self.STOPPED_ANCHOR_RADIUS_PX)
+            )
+
+            if is_stationary:
+                self._stopped_moving_frames[tid] = 0
                 start_ts = self._stopped_since.setdefault(tid, frame_ts)
                 self._stopped_anchor.setdefault(tid, (cx, cy))
                 stopped_sec = round(max(0.1, frame_ts - start_ts), 1)
-                if spd >= self.STOPPED_SPEED_KMH:
+                if spd is not None and spd >= self.STOPPED_SPEED_KMH:
                     spd = 0.0
             else:
-                self._stopped_since.pop(tid, None)
-                self._stopped_anchor.pop(tid, None)
-                stopped_sec = 0.0
+                if tid in self._stopped_since:
+                    # Debounce: require at least 8 consecutive moving frames before clearing stopped timer
+                    moving_count = self._stopped_moving_frames.get(tid, 0) + 1
+                    self._stopped_moving_frames[tid] = moving_count
+                    if moving_count >= 8:
+                        self._stopped_since.pop(tid, None)
+                        self._stopped_anchor.pop(tid, None)
+                        self._stopped_moving_frames.pop(tid, None)
+                        stopped_sec = 0.0
+                    else:
+                        start_ts = self._stopped_since[tid]
+                        stopped_sec = round(max(0.1, frame_ts - start_ts), 1)
+                else:
+                    stopped_sec = 0.0
 
             tracks_data.append({
                 "id":          tid,

@@ -591,7 +591,7 @@ def delete_events_for_date(date_str: str) -> dict[str, Any]:
         "sheet": None,
     }
     try:
-        import api.sheets_sync as sheets_sync
+        import server.gsheets_exporter as sheets_sync
         if sheets_sync.is_configured():
             sheets_sync.delete_day_rows(date_str)
             sync_status = sheets_sync.sync_to_google_sheets()

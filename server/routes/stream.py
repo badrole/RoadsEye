@@ -12,8 +12,8 @@ import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from api.pipeline_manager import manager
-from api.schemas import (
+from server.runtime_controller import manager
+from server.schemas import (
     CountModeRequest,
     CountModeResponse,
     LinesResponse,
@@ -24,7 +24,7 @@ from api.schemas import (
     ZoneResponse,
     ZoneUpdateRequest,
 )
-from core.pipeline import PipelineConfig
+from engine.stream_processor import PipelineConfig
 
 router = APIRouter(tags=["stream"])
 
@@ -68,7 +68,7 @@ async def pipeline_status() -> PipelineStatus:
 # ── REST: live line editing ───────────────────────────────────────────────────
 
 def _status_lines(content) -> list:
-    from api.schemas import CountingLineStatus
+    from server.schemas import CountingLineStatus
     out = []
     for s in content:
         out.append(CountingLineStatus(name=s.name, x1=int(s.p1[0]), y1=int(s.p1[1]),
@@ -159,7 +159,7 @@ async def ws_video(ws: WebSocket) -> None:
         pass
     finally:
         manager.unsubscribe_video(q)
-        import api.events_db as events_db
+        import server.event_store as events_db
         events_db.writer.flush()
 
 
@@ -197,5 +197,5 @@ async def ws_metrics(ws: WebSocket) -> None:
         pass
     finally:
         manager.unsubscribe_metrics(q)
-        import api.events_db as events_db
+        import server.event_store as events_db
         events_db.writer.flush()

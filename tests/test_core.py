@@ -8,9 +8,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from core.analytics import AnalyticsEngine, CountingLine, AnomalyDetector
-from core.detector import Detection
-from core.tracker import Track
+from engine.traffic_metrics import AnalyticsEngine, CountingLine, AnomalyDetector
+from engine.yolo_infer import Detection
+from engine.vehicle_tracker import Track
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -128,7 +128,7 @@ class TestAnalyticsEngine:
         assert metrics.vehicles_in_frame == 5
 
     def test_count_increments_on_crossing(self):
-        from core.analytics import CountingLineSpec
+        from engine.traffic_metrics import CountingLineSpec
         engine = AnalyticsEngine(counting_lines=[CountingLineSpec("line", (0, 100), (1280, 100))])
 
         # Frame 1: above
@@ -139,7 +139,7 @@ class TestAnalyticsEngine:
         assert metrics.total_count == 1
 
     def test_line_specs_preserve_counts_on_edit(self):
-        from core.analytics import CountingLineSpec
+        from engine.traffic_metrics import CountingLineSpec
         engine = AnalyticsEngine(counting_lines=[CountingLineSpec("line1", (0, 100), (1280, 100))])
 
         # Cross line1
@@ -197,12 +197,14 @@ class TestAnomalyDetector:
         engine = AnalyticsEngine()
         engine.set_count_mode("id")
 
-        # Frame 1: 2 motorcycles (class_id=2) and 1 car (class_id=0) in frame
+        # Frames 1-3: 2 motorcycles (class_id=2) and 1 car (class_id=0) in frame (MIN_HITS=3)
         tracks = [
             make_track(10, 50, 50, 90, 120, class_id=2),
             make_track(11, 150, 60, 190, 130, class_id=2),
             make_track(12, 300, 100, 420, 220, class_id=0),
         ]
+        engine.update(tracks)
+        engine.update(tracks)
         m1 = engine.update(tracks)
         assert m1.total_count == 3
         assert m1.count_per_class["motorcycle"] == 2
@@ -210,14 +212,14 @@ class TestAnomalyDetector:
         assert len(m1.crossings) == 3
         assert {c["track_id"] for c in m1.crossings} == {10, 11, 12}
 
-        # Frame 2: same IDs still in frame -> must NOT double-count
+        # Frame 4: same IDs still in frame -> must NOT double-count
         m2 = engine.update(tracks)
         assert m2.total_count == 3
         assert m2.count_per_class["motorcycle"] == 2
         assert m2.crossings == []
 
     def test_switch_line_to_id_counts_uncounted_in_frame_vehicles(self):
-        from core.analytics import CountingLineSpec
+        from engine.traffic_metrics import CountingLineSpec
         engine = AnalyticsEngine(counting_lines=[CountingLineSpec("line1", (0, 200), (1280, 200))])
 
         # Track 1 crosses line1; Track 2 (motorcycle) is in frame above line1 (uncounted)
@@ -234,12 +236,15 @@ class TestAnomalyDetector:
 
         # Switch to "id" mode while Track 1 and Track 2 are still in frame:
         # Track 1 was already counted by line1 (must not double-count),
-        # Track 2 (motorcycle) was NOT counted yet (must be counted immediately).
+        # Track 2 (motorcycle) was NOT counted yet (counted once MIN_HITS=3 reached).
         engine.set_count_mode("id")
-        m_id = engine.update([
+        id_tracks = [
             make_track(1, 0, 240, 100, 340, class_id=0),
             make_track(2, 200, 70, 250, 140, class_id=2),
-        ])
+        ]
+        engine.update(id_tracks)
+        engine.update(id_tracks)
+        m_id = engine.update(id_tracks)
         assert m_id.total_count == 2
         assert m_id.count_per_class["car"] == 1
         assert m_id.count_per_class["motorcycle"] == 1
@@ -282,12 +287,13 @@ class TestAnomalyDetector:
         # 1. Same truck (ID 60) outside zone (behind obstacle, detected as 'car' and 'bus' with high conf) -> NOT counted
         m1 = engine.update([make_track(60, 50, 200, 180, 320, class_id=0)])
         assert m1.total_count == 0
-        m2 = engine.update([make_track(60, 150, 200, 310, 320, class_id=1)])
+        m2 = engine.update([make_track(60, 60, 200, 190, 320, class_id=1)])
         assert m2.total_count == 0
 
-        # 2. Same truck (ID 60) enters 100% inside obstacle-free zone (detected as 'truck' conf 0.60)
+        # 2. Same truck (ID 60) enters obstacle-free zone (zone_hits >= 2, detected as 'truck' conf 0.60)
         # -> Out-of-zone 'car'/'bus' votes are cleared, so it is COUNTED and LABELED as 'truck'!
-        m3 = engine.update([Track(track_id=60, bbox=(220, 200, 420, 330), confidence=0.60, class_id=3)])
+        engine.update([Track(track_id=60, bbox=(220, 200, 420, 330), confidence=0.60, class_id=3)])
+        m3 = engine.update([Track(track_id=60, bbox=(230, 200, 430, 330), confidence=0.60, class_id=3)])
         assert m3.total_count == 1
         assert m3.count_per_class == {"truck": 1}
         assert m3.tracks[0]["class_name"] == "truck"
@@ -304,8 +310,8 @@ class TestAnomalyDetector:
 
 def test_hls_pipeline_preserves_all_segment_frames():
     import asyncio
-    from core.pipeline import Pipeline, PipelineConfig
-    from core.video_source import FrameMeta
+    from engine.stream_processor import Pipeline, PipelineConfig
+    from engine.media_reader import FrameMeta
 
     class FakeHlsSource:
         fps = 50.0
@@ -338,7 +344,7 @@ def test_hls_pipeline_preserves_all_segment_frames():
     pipeline = Pipeline(PipelineConfig(source="http://example/live.m3u8", draw_annotations=False))
 
     def fake_setup():
-        from core.tracker import Tracker
+        from engine.vehicle_tracker import Tracker
         pipeline._source = FakeHlsSource(30)
         pipeline._detector = FakeDetector()
         pipeline._tracker = Tracker(frame_rate=50)

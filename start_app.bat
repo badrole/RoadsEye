@@ -85,9 +85,9 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-if not exist "%PROJECT_DIR%\dashboard\node_modules" (
+if not exist "%PROJECT_DIR%\web\node_modules" (
     echo [2/5] Menginstall dependencies frontend - sekali saja...
-    cd /d "%PROJECT_DIR%\dashboard"
+    cd /d "%PROJECT_DIR%\web"
     call npm install --no-audit --no-fund
     if !errorlevel! neq 0 (
         echo [ERROR] Gagal install dependencies Node.
@@ -105,10 +105,10 @@ powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000,3000 -State
 
 :: -- 5. Jalankan backend + frontend di jendela terpisah --------------------
 echo [4/5] Menjalankan Backend API RoadsEye - Port 8000...
-start "RoadsEye - Backend" /d "%PROJECT_DIR%" cmd /k "title RoadsEye - Backend (Port 8000) & "%PROJECT_DIR%\venv\Scripts\python.exe" -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --no-access-log"
+start "RoadsEye - Backend" /d "%PROJECT_DIR%" cmd /k "title RoadsEye - Backend (Port 8000) & "%PROJECT_DIR%\venv\Scripts\python.exe" -m uvicorn server.app:app --host 0.0.0.0 --port 8000 --no-access-log"
 
 echo       Menjalankan Frontend Dashboard RoadsEye - Port 3000...
-start "RoadsEye - Frontend" /d "%PROJECT_DIR%\dashboard" cmd /k "title RoadsEye - Frontend (Port 3000) & npm run dev"
+start "RoadsEye - Frontend" /d "%PROJECT_DIR%\web" cmd /k "title RoadsEye - Frontend (Port 3000) & npm run dev"
 
 :: -- 6. Tunggu server siap lalu buka browser -------------------------------
 echo [5/5] Menunggu server siap...

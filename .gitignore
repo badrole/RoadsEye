@@ -24,6 +24,10 @@ env/
 kaggle.json
 
 # Model weights — never commit these
+weights/*.pt
+weights/*.onnx
+weights/*.bin
+weights/*.safetensors
 models/weights/*.pt
 models/weights/*.onnx
 models/weights/*.bin
@@ -53,6 +57,9 @@ desktop.ini
 *.swo
 
 # Node / frontend
+web/node_modules/
+web/dist/
+web/.vite/
 dashboard/node_modules/
 dashboard/dist/
 dashboard/.vite/

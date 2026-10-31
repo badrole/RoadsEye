@@ -3,8 +3,8 @@
 Demo mode: set source="demo" — runs a synthetic scene with no ONNX model required.
 
 Standalone test:
-    python -m core.pipeline --source data/sample_videos/traffic.mp4
-    python -m core.pipeline --source demo
+    python -m engine.stream_processor --source data/sample_videos/traffic.mp4
+    python -m engine.stream_processor --source demo
 """
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ from typing import AsyncGenerator, Generator
 import cv2
 import numpy as np
 
-from core.analytics import AnalyticsEngine, CountingLineSpec, FrameMetrics
-from core.tracker import Tracker, Track
-from core.video_source import VideoSource
+from engine.traffic_metrics import AnalyticsEngine, CountingLineSpec, FrameMetrics
+from engine.vehicle_tracker import Tracker, Track
+from engine.media_reader import VideoSource
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -99,10 +99,10 @@ class Pipeline:
         self._counting_enabled = counting_enabled
 
         self._source:    VideoSource | None = None
-        self._detector                      = None   # core.detector.Detector
+        self._detector                      = None   # engine.yolo_infer.Detector
         self._tracker:   Tracker | None     = None
         self._analytics: AnalyticsEngine | None = None
-        self._demo_gen                      = None   # core.demo_generator.DemoGenerator
+        self._demo_gen                      = None   # engine.demo_generator.DemoGenerator
         self._initial_counts: dict[str, int] = {}
         self._line_flash: dict[str, int] = {}       # line_name -> remaining flash frames
         self._crossed_flash: dict[int, int] = {}    # track_id -> remaining flash frames
@@ -114,11 +114,11 @@ class Pipeline:
         cfg = self.config
 
         if cfg.demo_mode:
-            from core.demo_generator import DemoGenerator
+            from engine.demo_generator import DemoGenerator
             self._demo_gen = DemoGenerator(fps=25.0)
             fps = 25.0
         else:
-            from core.detector import Detector
+            from engine.yolo_infer import Detector
             self._source = VideoSource(cfg.source, loop=cfg.loop)
             self._source.open()
             self._detector = Detector(

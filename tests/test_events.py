@@ -1,4 +1,4 @@
-# Tests for Phase 1 SQLite persistence (api.events_db) â€” all sync, no asyncio.
+# Tests for Phase 1 SQLite persistence (server.event_store) â€” all sync, no asyncio.
 #
 # AnalyticsEngine and events_db are synchronous; each test uses its own temp
 # DB so the real LOCALAPPDATA file is never touched.
@@ -10,10 +10,10 @@ import datetime as dt
 
 import pytest
 
-import api.events_db as events_db
-from core.analytics import AnalyticsEngine
-from core.analytics import CountingLineSpec
-from core.tracker import Track
+import server.event_store as events_db
+from engine.traffic_metrics import AnalyticsEngine
+from engine.traffic_metrics import CountingLineSpec
+from engine.vehicle_tracker import Track
 
 
 # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

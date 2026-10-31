@@ -14,7 +14,7 @@ from typing import AsyncGenerator
 
 import aiosqlite
 
-from api.schemas import MetricsMessage, HourlyAggregate
+from server.schemas import MetricsMessage, HourlyAggregate
 
 # DB file location — overridable via DATABASE_PATH env var
 import os as _os

@@ -11,8 +11,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from api.database import fetch_hourly_range, fetch_summary, ring_recent
-from api.events_db import (
+from server.state_buffer import fetch_hourly_range, fetch_summary, ring_recent
+from server.event_store import (
     backup,
     delete_events_for_date,
     history_summary,
@@ -20,7 +20,7 @@ from api.events_db import (
     query_events,
     vehicles_per_minute,
 )
-from api.schemas import (
+from server.schemas import (
     AnalyticsSummaryResponse,
     BackupResponse,
     EventsPage,
@@ -86,7 +86,7 @@ async def summary(
 @router.delete("/history", status_code=status.HTTP_204_NO_CONTENT)
 async def clear_ring_buffer() -> None:
     """Clear the in-memory ring buffer (does not affect SQLite)."""
-    from api.database import ring_clear
+    from server.state_buffer import ring_clear
     ring_clear()
 
 
@@ -249,7 +249,7 @@ async def export_events_csv(
 @router.get("/sheets/status")
 async def sheets_status() -> dict[str, Any]:
     """Check configuration and connectivity status with Google Sheets."""
-    import api.sheets_sync as sheets_sync
+    import server.gsheets_exporter as sheets_sync
     configured = sheets_sync.is_configured()
     sheet_id = sheets_sync.get_spreadsheet_id()
     return {
@@ -264,7 +264,7 @@ async def sheets_status() -> dict[str, Any]:
 @router.post("/sheets/sync")
 async def sheets_sync_now() -> dict[str, Any]:
     """Manually trigger immediate synchronization to Google Sheets."""
-    import api.sheets_sync as sheets_sync
+    import server.gsheets_exporter as sheets_sync
     if not sheets_sync.is_configured():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

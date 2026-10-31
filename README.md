@@ -15,11 +15,11 @@ Real-time vehicle detection, tracking, and traffic analytics for CCTV streams an
 
 Each video source runs through a 4-stage concurrent pipeline (`reader -> inference -> encoder -> pacer`):
 
-1. `core/video_source.py` reads frames from local MP4 files, USB webcams, RTSP streams, or HLS (`.m3u8`) feeds. For remote HLS streams, a background prefetcher downloads `.ts` segments using 12 parallel HTTP byte-range connections so per-connection throttling on CCTV servers does not stall playback.
-2. `core/detector.py` letterboxes frames to 640x640, runs YOLOv8s ONNX inference on CUDA (with CPU fallback), and filters boxes with NMS. It supports both custom 4-class traffic models and standard 80-class COCO models.
-3. `core/tracker.py` maintains vehicle IDs across frames using ByteTrack (`supervision`).
-4. `core/analytics.py` counts vehicles, calculates speed from pixel displacement, checks for traffic surges, stopped vehicles, and confidence drift, and outputs a `FrameMetrics` snapshot.
-5. `api/pipeline_manager.py` streams annotated JPEG frames over `/ws/video`, broadcasts JSON metrics over `/ws/metrics`, writes confirmed vehicle events to `data/roadseye.db`, and syncs daily summaries to Google Sheets.
+1. `engine/media_reader.py` reads frames from local MP4 files, USB webcams, RTSP streams, or HLS (`.m3u8`) feeds. For remote HLS streams, a background prefetcher downloads `.ts` segments using 12 parallel HTTP byte-range connections so per-connection throttling on CCTV servers does not stall playback.
+2. `engine/yolo_infer.py` letterboxes frames to 640x640, runs YOLOv8s ONNX inference on CUDA (with CPU fallback), and filters boxes with NMS. It supports both custom 4-class traffic models and standard 80-class COCO models.
+3. `engine/vehicle_tracker.py` maintains vehicle IDs across frames using ByteTrack (`supervision`).
+4. `engine/traffic_metrics.py` counts vehicles, calculates speed from pixel displacement, checks for traffic surges, stopped vehicles, and confidence drift, and outputs a `FrameMetrics` snapshot.
+5. `server/runtime_controller.py` streams annotated JPEG frames over `/ws/video`, broadcasts JSON metrics over `/ws/metrics`, writes confirmed vehicle events to `data/roadseye.db`, and syncs daily summaries to Google Sheets.
 
 ## Key Capabilities
 
@@ -66,10 +66,10 @@ Requirements: Python 3.10+ and Node.js 18+. For GPU acceleration on Windows, ins
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn api.main:app --host 0.0.0.0 --port 8000
+uvicorn server.app:app --host 0.0.0.0 --port 8000
 
 # 2. Frontend (in a second terminal)
-cd dashboard
+cd web
 npm install
 npm run dev
 ```
@@ -80,12 +80,12 @@ Open `http://localhost:3000`, enter a video source (`0` for webcam, a local `.mp
 
 ## Configuration
 
-Copy `.env.example` to `.env` in the project root. `api/main.py` loads `.env` on startup.
+Copy `.env.example` to `.env` in the project root. `server/app.py` loads `.env` on startup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VIDEO_SOURCE` | unset | Source to auto-start on boot (`0`, file path, or RTSP/HLS URL). Leave empty to start manually from the UI. |
-| `MODEL_PATH` | `models/weights/yolov8s_traffic.onnx` | Path to the YOLOv8 ONNX model. |
+| `MODEL_PATH` | `weights/yolov8s_traffic.onnx` | Path to the YOLOv8 ONNX model. |
 | `CONFIDENCE_THRESHOLD` | `0.25` | Minimum detection confidence (`0.0` to `1.0`). |
 | `IOU_THRESHOLD` | `0.45` | NMS IoU threshold (`0.0` to `1.0`). |
 | `COUNT_MODE` | `line` | Default counting mode (`line` or `id`). |
@@ -154,27 +154,26 @@ Full OpenAPI documentation is available at `http://localhost:8000/docs`.
 
 ```text
 RoadsEye/
-├── api/
-│   ├── main.py               FastAPI app, lifespan, auto-start, CORS
-│   ├── pipeline_manager.py   Singleton pipeline runner, queues, DB & Sheets hooks
-│   ├── events_db.py          SQLite WAL event store, background writer, WIB queries
-│   ├── database.py           In-memory ring buffer and hourly aggregate store
-│   ├── sheets_sync.py        Google Sheets API v4 sync
+├── server/
+│   ├── app.py                FastAPI app, lifespan, auto-start, CORS
+│   ├── runtime_controller.py Singleton pipeline runner, queues, DB & Sheets hooks
+│   ├── event_store.py        SQLite WAL event store, background writer, WIB queries
+│   ├── state_buffer.py       In-memory ring buffer and hourly aggregate store
+│   ├── gsheets_exporter.py   Google Sheets API v4 sync
 │   ├── schemas.py            Pydantic v2 request and response schemas
 │   └── routes/               health.py, stream.py, analytics.py
-├── core/
-│   ├── pipeline.py           4-stage async pipeline, drawing, and CLI runner
-│   ├── video_source.py       VideoCapture wrapper and parallel HLS prefetcher
-│   ├── detector.py           YOLOv8 ONNX Runtime inference and NMS
-│   ├── tracker.py            ByteTrack wrapper
-│   └── analytics.py          Line counter, ID counter, counting zone, speed, and alerts
-├── dashboard/
+├── engine/
+│   ├── stream_processor.py   4-stage async pipeline, drawing, and CLI runner
+│   ├── media_reader.py       VideoCapture wrapper and parallel HLS prefetcher
+│   ├── yolo_infer.py         YOLOv8 ONNX Runtime inference and NMS
+│   ├── vehicle_tracker.py    ByteTrack wrapper
+│   └── traffic_metrics.py    Line counter, ID counter, counting zone, speed, and alerts
+├── web/
 │   ├── src/App.jsx           Main monitoring layout and database viewer router
 │   ├── src/components/       VideoFeed, LineEditor, StatsCards, charts, DatabaseViewer
 │   ├── src/hooks/            useWebSocket.js (video ImageBitmap + throttled metrics)
 │   └── vite.config.js        Vite dev server and /api proxy
-├── models/weights/           ONNX model directory (yolov8s_traffic.onnx)
-├── notebooks/                Data exploration and YOLOv8 training notebooks
+├── weights/                  ONNX model directory (yolov8s_traffic.onnx)
 ├── tests/                    test_core.py, test_api.py, test_events.py, test_sheets.py
 ├── start_app.bat             Windows one-click launcher
 ├── stop_app.bat              Windows service stopper
